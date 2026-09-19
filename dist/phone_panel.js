@@ -19,6 +19,16 @@
     mine: '#3a5a7a', theirs: '#33414f',
   };
 
+  // ---------- 工具 ----------
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const val = (v) => (Array.isArray(v) && v.length === 2 && typeof v[1] === 'string' ? v[0] : v);
+  function reportError(msg, err) {
+    try { console.error(TAG, msg, err); } catch (e2) {}
+    try { toastr.error(String(msg) + (err ? '：' + (err.message || err) : ''), '批条 · 手机'); } catch (e2) {}
+  }
+  function toast(type, msg) { try { toastr[type](msg, '批条 · 手机'); } catch (e) { console.info(TAG, msg); } }
+  function reportInfo(msg) { try { console.info(TAG, msg); } catch (e) {} }
+
   // ---------- 拖动系统（照抄参考卡 makeDraggable：pointer capture + 钳制 + 存档） ----------
   const VIEW = window.parent && window.parent.document ? window.parent : window;
   const DOC = VIEW.document;
