@@ -593,7 +593,7 @@ function ptOnPlayerReply(payload) {
     n: (payload && payload.n) || '1-2',
     focus: payload && payload.focus,
     linesByConv: payload && payload.linesByConv,
-  });
+  }, true);
 }
 var AUTO_STRANGER_CHANCE = 0.25, AUTO_STRANGER_MINGAP = 3, AUTO_STRANGER_MAXPENDING = 4;
 // ── v0.3.5：剧情成员同步（正文出场人物自动入列 + 察觉变化触发剧情私信） ──
@@ -776,7 +776,11 @@ async function ptOnFloorLog() {
 
 // 请求队列（批量合并）
 var _reqQueue = [];
-function enqueueRequest(req) { _reqQueue.push(req); pumpRequests(); }
+function enqueueRequest(req, urgent) {
+  // v0.3.7：玩家回信插队（urgent）——回信排在剧情私信/事件请求前面，体验即时
+  if (urgent && _reqQueue.length) { _reqQueue.unshift(req); } else { _reqQueue.push(req); }
+  pumpRequests();
+}
 var _pumping = false;
 async function pumpRequests() {
   if (_pumping) return;
