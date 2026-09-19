@@ -2,7 +2,8 @@
 //
 // 职责（design-brief §9）：悬浮入口 + 手机四应用（微信/联系人/关系网/备忘录）+ 设置页
 // 机制照抄参考卡《Sugar Daddy Simulator》phone_panel（2026-09-19 拆解其线上脚本）：
-//   - 发件箱：玩家回复先攒进待发队列（存聊天变量 phone._outbox，防重载/切聊天丢失），
+//   - 发件箱：玩家回复先攒进待发队列（v0.2.6 起存 TH 聊天级变量 piaotiao_outbox，
+//     私信/会话真源在 piaotiao_phone——楼层变量按 swipe 重算会丢面板写入，见 readPhone 注释），
 //     主屏一个「确定发送」横条统一发出——支持同时给多人发消息
 //   - 拖动：makeDraggable（pointer capture + 6px 点击阈值 + 视口钳制 + 位置存档 localStorage）
 //     悬浮窗与面板都可拖动；默认位不在屏幕边角（军规 1.4：小屏/缩放会切掉贴边元素）
@@ -68,17 +69,24 @@
   }
   // 委托版拖动（事件挂容器，子元素重建不影响）：命中把手/面板头部才开始拖
   const dragState = { el: null, key: null, sx: 0, sy: 0, ox: 0, oy: 0, moved: false };
+  let suppressNextClick = false; // 拖动结束后浏览器补发的 click 一律吞掉
   function dragPointerDown(e, el, key) {
     dragState.el = el; dragState.key = key; dragState.sx = e.clientX; dragState.sy = e.clientY;
     const r = el.getBoundingClientRect(); dragState.ox = r.left; dragState.oy = r.top;
     dragState.moved = false;
-    try { el.setPointerCapture && el.setPointerCapture(e.pointerId); } catch (err) {}
+    // v0.2.6 真机实证：此处绝不能 setPointerCapture——pointerdown 就捕获会把后续 click
+    // 重定向到容器本身，手机按钮的点击分支（closest('#piaotiao-phone-btn')）永远落空，
+    // 悬浮窗就点不开了（Playwright 真实点击复现 display:none）。捕获推迟到跨过拖动阈值。
   }
   function dragPointerMove(e) {
     if (!dragState.el) return;
     const dx = e.clientX - dragState.sx, dy = e.clientY - dragState.sy;
     if (!dragState.moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return; // 6px 内算点击不算拖
-    dragState.moved = true;
+    if (!dragState.moved) {
+      dragState.moved = true;
+      // 跨过阈值才捕获：拖动中指针移出元素也不断流；纯点击全程无捕获，click 正常命中子元素
+      try { dragState.el.setPointerCapture && dragState.el.setPointerCapture(e.pointerId); } catch (err) {}
+    }
     recalib();
     const c = clampXY(dragState.ox + dx, dragState.oy + dy);
     setClientPos(dragState.el, c.x, c.y);
@@ -86,6 +94,8 @@
   }
   function dragPointerUp() {
     if (dragState.el && dragState.moved) {
+      suppressNextClick = true; // 真实拖动松手后浏览器仍补发一次 click（重定向到容器），吞掉防误开面板
+      setTimeout(() => { suppressNextClick = false; }, 0);
       recalib();
       const r = dragState.el.getBoundingClientRect();
       savePos(dragState.key, r.left, r.top);
@@ -108,18 +118,53 @@
     return (data && data.stat_data) || null;
   }
 
-  // ---------- 发件箱（照抄参考卡：存聊天变量，防重载/切聊天丢失） ----------
-  async function loadOutbox() {
+  // ---------- 聊天级真源（v0.2.6） ----------
+  // 真机实证：楼层变量按 楼层×swipe 双键存（聊天文件 variables:array[swipe]），swipe/重处理会从
+  // 上一楼 klona 重算（bundle Qo/At），面板写入不在 <UpdateVariable> 文本里 → swipe 即蒸发；
+  // 流式期间的写入会被 MVU VUE 落盘覆盖。故私信/会话/发件箱真源迁 TH 聊天级变量（跟聊天走、
+  // 免疫 swipe），楼层 stat_data.phone 由账房每楼嫁接成投影供模型看见。
+  const CHAT_PHONE_KEY = 'piaotiao_phone';   // { wechat_conversations, wechat_messages }（账房/私信生成器共写）
+  const CHAT_OUTBOX_KEY = 'piaotiao_outbox'; // 发件箱（面板独写，键隔离防互踩）
+  let _saveTimer = null;
+  function scheduleChatSave() { // v0.2.6 实证：replaceVariables 不触发聊天保存，不补这一脚关页就丢
     try {
-      const sd = (await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' })).stat_data;
-      return (sd && sd.phone && sd.phone._outbox) || {};
-    } catch (e) { return {}; }
+      if (_saveTimer) clearTimeout(_saveTimer);
+      _saveTimer = setTimeout(() => {
+        try { window.SillyTavern && window.SillyTavern.saveChat && window.SillyTavern.saveChat(); } catch (e) { /* 保存失败不阻塞 */ }
+      }, 800);
+    } catch (e) { /* 不阻塞 */ }
+  }
+  // 聊天级变量写锁（v0.2.6 真机实证：面板清发件箱与私信生成器写玩家消息并发整对象读写，
+  // 后落盘者覆盖前者——玩家消息因此蒸发）。三个脚本同住一个运行时 iframe，共享一把链式锁。
+  function lockChatWrite(run) {
+    const w = window;
+    const p = (w.__piaotiaoCvChain || Promise.resolve()).then(run, run);
+    w.__piaotiaoCvChain = p.then(() => {}, () => {});
+    return p;
+  }
+  async function chatVars() {
+    if (typeof getVariables !== 'function') throw new Error('getVariables 不可用（酒馆助手未就绪）');
+    const cv = await getVariables({ type: 'chat' });
+    return (cv && typeof cv === 'object') ? cv : {};
+  }
+  async function readPhone() {
+    try {
+      const o = (await chatVars())[CHAT_PHONE_KEY];
+      const p = (o && typeof o === 'object') ? o : {};
+      return { wechat_conversations: p.wechat_conversations || {}, wechat_messages: p.wechat_messages || {} };
+    } catch (e) { return { wechat_conversations: {}, wechat_messages: {} }; }
+  }
+  async function loadOutbox() {
+    try { const o = (await chatVars())[CHAT_OUTBOX_KEY]; return (o && typeof o === 'object') ? o : {}; }
+    catch (e) { return {}; }
   }
   async function saveOutbox(ob) {
-    const fresh = await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' });
-    fresh.stat_data.phone = fresh.stat_data.phone || {};
-    fresh.stat_data.phone._outbox = ob;
-    await window.Mvu.replaceMvuData(fresh, { type: 'message', message_id: 'latest' });
+    await lockChatWrite(async () => {
+      const cv = await chatVars();
+      cv[CHAT_OUTBOX_KEY] = ob;
+      await replaceVariables(cv, { type: 'chat' });
+    });
+    scheduleChatSave();
   }
   async function outboxCount() {
     const ob = await loadOutbox();
@@ -354,7 +399,7 @@
   }
   async function viewWechat(stat) {
     if (currentConv) return wechatThread(stat, currentConv);
-    const convs = stat.phone?.wechat_conversations || {};
+    const convs = (await readPhone()).wechat_conversations;
     const ob = await loadOutbox();
     const ids = Object.keys(convs);
     const obCount = await outboxCount();
@@ -383,11 +428,11 @@
       (rows || '<div style="padding:24px;color:' + COLORS.dim + ';text-align:center;font-size:13px;">暂无会话<br><span style="font-size:12px;">剧情里的微信往来会出现在这里</span></div>') + '</div>';
   }
 
-  function wechatThread(stat, convId) {
-    const box = (stat.phone?.wechat_messages || {})[convId];
+  async function wechatThread(stat, convId) {
+    const box = ((await readPhone()).wechat_messages || {})[convId];
     const list = (box && Array.isArray(val(box.messages))) ? val(box.messages) : [];
     const name = convName(stat, convId);
-    const ob = stat.phone?._outbox || {};
+    const ob = await loadOutbox();
     const queued = (ob[convId] || []).length;
     const items = list.map((m) => {
       const mine = val(m.from) === 'player';
@@ -421,22 +466,39 @@
       render();
     } catch (e) { reportError('加入队列失败', e); }
   }
-  // 确定发送：把发件箱里所有人的消息逐个发事件（生成器串行处理）
+  // 确定发送：先清发件箱（带锁），再逐会话发事件——清空在前、派发在后，
+  // 消灭「清空整对象写」与「生成器写玩家消息」的并发覆盖窗口（v0.2.6 真机实证）
   async function sendAll() {
     try {
+      // W3 守卫（v0.2.6）：独立 API 未配置或私信模块未就绪时，绝不派发、绝不清空发件箱——
+      // 玩家消息留在待发队列，绝不凭空消失
+      let cfg = null;
+      try { cfg = JSON.parse(localStorage.getItem('piaotiao_dm_api') || 'null'); } catch (e) { cfg = null; }
+      if (!cfg || !(cfg.url || cfg.apiurl) || !cfg.key) {
+        toast('warning', '先到「设置」填好独立 API 地址和 Key 再发送；你的消息还留在待发队列');
+        return;
+      }
+      if (!window.__PiaotiaoDmGenerator) {
+        toast('error', '私信模块还没就绪，消息已留在待发队列，稍后再试');
+        return;
+      }
       const stat = await readStat();
       const ob = await loadOutbox();
       const ids = Object.keys(ob).filter((k) => (ob[k] || []).length);
       if (!ids.length) { toast('info', '队列为空'); return; }
+      const tasks = [];
       for (const convId of ids) {
         const lines = ob[convId] || [];
         if (!lines.length) continue;
         const name = convName(stat, convId);
         const reason = '玩家在私信里对 ' + name + ' 说了：' + lines.map((s) => '「' + s + '」').join('、') +
           '。只让 ' + name + ' 本人回应这些，别的角色不要出现、不要插话。';
-        try { window.dispatchEvent(new CustomEvent('piaotiao_request_dm', { detail: { convId, reason, lines } })); } catch (e) { reportError('私信触发失败', e); }
+        tasks.push({ convId, reason, lines });
       }
-      await saveOutbox({}); // 清空发件箱
+      await saveOutbox({}); // 先清空发件箱（带锁），再派发
+      for (const t of tasks) {
+        try { window.dispatchEvent(new CustomEvent('piaotiao_request_dm', { detail: t })); } catch (e) { reportError('私信触发失败', e); }
+      }
       window.__piaotiaoPending = 0;
       toast('success', '📨 已发送，等他们回复…');
       renderLauncher();
@@ -513,9 +575,8 @@
   // ---------- 事件与自愈 ----------
   async function onVariableUpdateEnded() {
     try {
-      const stat = await readStat();
       let unread = 0;
-      Object.values((stat && stat.phone && stat.phone.wechat_conversations) || {}).forEach((c) => { unread += Number(val(c.unread)) || 0; });
+      Object.values((await readPhone()).wechat_conversations).forEach((c) => { unread += Number(val(c.unread)) || 0; });
       window.__piaotiaoUnread = unread;
       window.__piaotiaoPending = await outboxCount();
       if (root) renderLauncher();
@@ -557,6 +618,7 @@
 
   // ---------- 交互委托（root 与 panelHost 各绑一次） ----------
   function onRootClick(e) {
+    if (suppressNextClick) { suppressNextClick = false; return; }
     const t = e.target && e.target.closest ? e.target : null;
     if (!t) return;
     if (t.closest('#piaotiao-phone-btn')) { openPanel(); return; }

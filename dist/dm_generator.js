@@ -4,7 +4,8 @@
 //   - 触发：面板玩家回复 → 自定义事件 piaotiao_request_dm；正文楼结算（VUE）→ 事件相关联系人主动来信
 //   - 生成：独立 API 直连 fetch（callIndependent，chatUrlOf 规范化，temperature 1.0，不带 max_tokens）
 //   - 输出：`名字|text|内容` 行格式（对思考模型/噪声远比 JSON 健壮），<think> 与 ``` 围栏预清洗
-//   - 写回：重读最新 stat_data，只写 phone 子树（竞态保护）；失败静默跳过，保持待答标记
+//   - 写回：v0.2.6 起私信/会话真源在 TH 聊天级变量 piaotiao_phone（读-改-写，竞态保护）；
+//     楼层 stat_data.phone 由账房每楼嫁接投影；失败静默跳过，保持待答标记
 // 【硬性边界】聊天 API 仅供酒馆正文 RP——本脚本没有也不允许有主 API 回退路径（用户明令 2026-09-19）：
 //   未配置独立 API（面板-设置）则完全不生成。
 (function () {
@@ -17,6 +18,51 @@
   const wrapLike = (old, v) => (isPair(old) ? [v, old[1]] : v);
   const MAX_MSGS = 30;
   const VALID_TYPES = ['text', 'voice', 'transfer', 'sticker', 'image'];
+
+  // ---------- 聊天级真源（v0.2.6，机制同 phone_panel.js） ----------
+  // 楼层变量按 楼层×swipe 双键存且 swipe 会从上一楼重算（bundle Qo/At + 聊天文件实证），
+  // 写入不在 <UpdateVariable> 文本里就会蒸发；流式期间写入会被 VUE 落盘覆盖。
+  // 故私信/会话真源在 TH 聊天级变量 piaotiao_phone；账房每楼嫁接进楼层投影供模型看见。
+  const CHAT_PHONE_KEY = 'piaotiao_phone';
+  async function chatVars() {
+    if (typeof getVariables !== 'function') throw new Error('getVariables 不可用（酒馆助手未就绪）');
+    const cv = await getVariables({ type: 'chat' });
+    return (cv && typeof cv === 'object') ? cv : {};
+  }
+  function ensurePhoneShape(p) {
+    const o = (p && typeof p === 'object') ? p : {};
+    o.wechat_conversations = o.wechat_conversations || {};
+    o.wechat_messages = o.wechat_messages || {};
+    return o;
+  }
+  let _saveTimer = null;
+  function scheduleChatSave() { // v0.2.6 实证：replaceVariables 不触发聊天保存，不补这一脚关页就丢
+    try {
+      if (_saveTimer) clearTimeout(_saveTimer);
+      _saveTimer = setTimeout(() => {
+        try { window.SillyTavern && window.SillyTavern.saveChat && window.SillyTavern.saveChat(); } catch (e) { /* 保存失败不阻塞 */ }
+      }, 800);
+    } catch (e) { /* 不阻塞 */ }
+  }
+  function lockChatWrite(run) { // 与面板/账房共享同一把链式锁（同 iframe 全局链），串行化聊天级写
+    const w = window;
+    const p = (w.__piaotiaoCvChain || Promise.resolve()).then(run, run);
+    w.__piaotiaoCvChain = p.then(() => {}, () => {});
+    return p;
+  }
+  async function readPhoneTruth() {
+    return ensurePhoneShape((await chatVars())[CHAT_PHONE_KEY]);
+  }
+  async function mutatePhone(fn) { // 读-改-写；全局写锁串行化（防并发整对象覆盖，v0.2.6 真机实证）
+    await lockChatWrite(async () => {
+      const cv = await chatVars();
+      const p = ensurePhoneShape(cv[CHAT_PHONE_KEY]);
+      cv[CHAT_PHONE_KEY] = p;
+      fn(p);
+      await replaceVariables(cv, { type: 'chat' });
+    });
+    scheduleChatSave();
+  }
 
   // ---------- 独立 API（照抄参考卡 callIndependent / chatUrlOf） ----------
   function chatUrlOf(u) {
@@ -133,8 +179,8 @@
     }
     return '（该联系人无家庭信息差格子，只按自身档案与公开剧情行事）';
   }
-  function recentMessages(sd, convId, n) {
-    const box = (sd.phone?.wechat_messages || {})[convId];
+  function recentMessages(phone, sd, convId, n) {
+    const box = (phone.wechat_messages || {})[convId];
     const list = box && Array.isArray(val(box.messages)) ? val(box.messages) : [];
     return list.slice(-n).map((m) => (val(m.from) === 'player' ? '我：' : val(convName(sd, convId)) + '：') + val(m.text));
   }
@@ -150,57 +196,52 @@
     '输出格式（必须严格遵守）：每条私信一行，格式为 名字|类型|内容。类型只用 text。不输出任何其他文字、解释或 markdown。\n';
 
   async function generateDMs(convId, n, reason, playerLines) {
+    // 玩家从发件箱发出的消息先入账（v0.2.6：先于 API 检查——未配置 API 也不丢玩家消息，W3 双保险）
+    if (Array.isArray(playerLines) && playerLines.length) {
+      const floor0 = currentFloorSafe();
+      await mutatePhone((p) => {
+        const entry0 = p.wechat_messages[convId] = p.wechat_messages[convId] || { messages: [] };
+        const list0 = Array.isArray(val(entry0.messages)) ? val(entry0.messages) : (entry0.messages = []);
+        for (const line of playerLines) list0.push({ from: 'player', text: String(line), floor: floor0 });
+        while (list0.length > MAX_MSGS) list0.shift();
+        const conv0 = p.wechat_conversations[convId] = p.wechat_conversations[convId] || { unread: 0, last_summary: '', suggested_replies: [] };
+        conv0.last_summary = '我：' + String(playerLines[playerLines.length - 1]).slice(0, 40);
+        conv0.dm_pending = true;
+      });
+    }
     const cfg = getApiCfg();
-    if (!cfg) { console.info(TAG, '未配置独立 API，跳过私信生成（手机面板-设置里填写后生效）'); return; }
+    if (!cfg) { console.info(TAG, '未配置独立 API，玩家消息已入账、跳过回信生成（手机面板-设置里填写后生效）'); return; }
     const fresh = await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' });
     const sd = fresh.stat_data;
     if (!sd || !sd.phone) return;
     const name = convName(sd, convId);
-
-    // 玩家从发件箱发出的消息先入账（照参考卡：玩家的话进会话记录，NPC 才有回应对象）
-    if (Array.isArray(playerLines) && playerLines.length) {
-      const box0 = (sd.phone.wechat_messages = sd.phone.wechat_messages || {});
-      const entry0 = box0[convId] = box0[convId] || { messages: [] };
-      const list0 = Array.isArray(val(entry0.messages)) ? val(entry0.messages) : (entry0.messages = []);
-      const floor0 = currentFloorSafe();
-      for (const line of playerLines) list0.push({ from: 'player', text: String(line), floor: floor0 });
-      while (list0.length > MAX_MSGS) list0.shift();
-      const convs0 = (sd.phone.wechat_conversations = sd.phone.wechat_conversations || {});
-      const conv0 = convs0[convId] = convs0[convId] || { unread: 0, last_summary: '', suggested_replies: [] };
-      conv0.last_summary = '我：' + String(playerLines[playerLines.length - 1]).slice(0, 40);
-      conv0.dm_pending = true;
-      await window.Mvu.replaceMvuData(fresh, { type: 'message', message_id: 'latest' });
-    }
+    const phoneNow = await readPhoneTruth();
 
     const messages = [
       { role: 'system', content: SYSTEM_HEAD + '\n【联系人档案】\n' + contactBrief(sd, convId) + '\n【信息差】\n' + asymSummary(sd, convId) },
       { role: 'user', content: '【当前事件】\n' + eventSummary(sd) +
-        '\n【最近消息】\n' + (recentMessages(sd, convId, 6).join('\n') || '（无）') +
+        '\n【最近消息】\n' + (recentMessages(phoneNow, sd, convId, 6).join('\n') || '（无）') +
         '\n\n请生成 ' + n + ' 条 ' + name + ' 发来的新私信' + (reason ? '（情境：' + reason + '）' : '') + '。每条一行：名字|text|内容' },
     ];
 
     let raw = await callIndependent(cfg, messages);
     const rows = parseDMs(raw).filter((r) => r.name === name || name.includes(r.name) || r.name.includes(name));
 
-    // 写回：重读最新，仅写 phone 子树（竞态保护）
-    const latest = await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' });
-    const lsd = latest.stat_data;
-    lsd.phone = lsd.phone || { wechat_conversations: {}, wechat_messages: {} };
-    const box = (lsd.phone.wechat_messages = lsd.phone.wechat_messages || {});
-    const entry = box[convId] = box[convId] || { messages: [] };
-    const list = Array.isArray(val(entry.messages)) ? val(entry.messages) : (entry.messages = []);
+    // 写回：重读聊天级真源再写（竞态保护；v0.2.6 起不再直写楼层变量）
     const floor = currentFloorSafe();
-    for (const r of rows) {
-      list.push({ from: 'npc', text: r.raw, type: r.type, floor });
-    }
-    while (list.length > MAX_MSGS) list.shift();
-    const convs = (lsd.phone.wechat_conversations = lsd.phone.wechat_conversations || {});
-    const conv = convs[convId] = convs[convId] || { unread: 0, last_summary: '', suggested_replies: [] };
-    const lastRow = rows[rows.length - 1];
-    conv.last_summary = name + '：' + (lastRow ? lastRow.raw.slice(0, 40) : '');
-    conv.unread = wrapLike(conv.unread, (Number(val(conv.unread)) || 0) + rows.length);
-    conv.dm_pending = false;
-    await window.Mvu.replaceMvuData(latest, { type: 'message', message_id: 'latest' });
+    await mutatePhone((p) => {
+      const entry = p.wechat_messages[convId] = p.wechat_messages[convId] || { messages: [] };
+      const list = Array.isArray(val(entry.messages)) ? val(entry.messages) : (entry.messages = []);
+      for (const r of rows) {
+        list.push({ from: 'npc', text: r.raw, type: r.type, floor });
+      }
+      while (list.length > MAX_MSGS) list.shift();
+      const conv = p.wechat_conversations[convId] = p.wechat_conversations[convId] || { unread: 0, last_summary: '', suggested_replies: [] };
+      const lastRow = rows[rows.length - 1];
+      conv.last_summary = name + '：' + (lastRow ? lastRow.raw.slice(0, 40) : '');
+      conv.unread = (Number(val(conv.unread)) || 0) + rows.length; // 聊天级为裸值，无成对格式
+      conv.dm_pending = false;
+    });
     try { window.dispatchEvent(new Event('piaotiao_phone_refresh')); } catch (e) { /* 面板未挂载时忽略 */ }
     console.info(TAG, '私信已产出 ×' + rows.length + '：', convId);
   }
@@ -235,9 +276,9 @@
       if (!cfg) return; // 未配置独立 API：什么都不做
       const sd = (await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' })).stat_data;
       if (!sd || !sd.phone) return;
-      // 新事件消息：有进行中事件时，从事件相关或可用联系人里挑一个主动来信
+      // 新事件消息：有进行中事件时，从事件相关或可用联系人里挑一个主动来信（待答会话读聊天级真源）
       const evs = Object.values(sd.events || {});
-      const convs = sd.phone.wechat_conversations || {};
+      const convs = (await readPhoneTruth()).wechat_conversations;
       const pending = Object.keys(convs).find((id) => val(convs[id].dm_pending) === true);
       let target = pending;
       let reason = '玩家有待回复的私信';
