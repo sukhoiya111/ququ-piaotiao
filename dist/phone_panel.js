@@ -614,7 +614,15 @@
     D: ['被吞噬者', '别人流程里的一个章'], E: ['共生体', '谁也不敢先动'], F: ['末路', 'S市不缺下一个中间人'],
   };
   function galleryRead() {
-    try { var v = getVariables({ type: 'script' }) || {}; return v.piaotiao_gallery || {}; } catch (e) { return {}; }
+    // v0.3.3-W5：主存 localStorage（重导卡不清档）；脚本级旧数据自动迁移进主存
+    var out = {};
+    try { out = JSON.parse(lsGet('piaotiao_gallery_v1') || '{}') || {}; } catch (e0) { out = {}; }
+    try {
+      var v = getVariables({ type: 'script' }) || {};
+      var legacy = v.piaotiao_gallery || {};
+      Object.keys(legacy).forEach(function (k) { if (!out[k]) out[k] = legacy[k]; });
+    } catch (e1) { /* TH 不可用时只用主存 */ }
+    return out;
   }
   function fmtDay(ts) {
     var d = new Date(ts);
@@ -634,12 +642,12 @@
         ? '<span style="color:var(--green);font-size:11px;flex-shrink:0;">✓ ' + fmtDay(rec.ts) + '</span>'
         : '<span style="color:var(--dim);font-size:11px;flex-shrink:0;">未解锁</span>';
       rows += '<div class="pt-row" style="cursor:default;' + (isCur ? 'border-left:3px solid var(--gold);' : '') + '">' +
-        '<span class="pt-ava" style="' + (rec ? '' : 'filter:grayscale(1);opacity:.5;') + '">' + (rec ? x : '?') + '</span>' +
+        '<span class="pt-ava" style="' + (rec ? 'background:var(--gold);' : 'filter:grayscale(1);opacity:.5;') + '">' + (rec ? x : '?') + '</span>' +
         '<span class="pt-mid"><span class="pt-name"><span>' + (rec ? esc(m[0]) : '<span style="color:var(--dim);">？？？</span>') +
         (isCur ? ' <span style="font-size:10px;color:var(--gold);">本局</span>' : '') + '</span>' + right + '</span>' +
         '<span class="pt-prev">' + (rec ? esc(m[1]) : '这条路线还没有人走到头') + '</span></span></div>';
     });
-    return '<div style="padding:10px 14px;font-size:12px;color:var(--dim);">跨聊天图鉴 · 解锁一次永久点亮（存本机酒馆助手，不进聊天文件）</div>' + rows;
+    return '<div style="padding:10px 14px;font-size:12px;color:var(--dim);">跨聊天图鉴 · 解锁一次永久点亮（存本机，重导卡不清档）</div>' + rows;
   }
 
   // ── 设置 ──
