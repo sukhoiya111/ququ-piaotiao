@@ -18,8 +18,6 @@
   const MAX_MSGS = 30;
   const VALID_TYPES = ['text', 'voice', 'transfer', 'sticker', 'image'];
 
-  let busy = false;
-
   // ---------- 独立 API（照抄参考卡 callIndependent / chatUrlOf） ----------
   function chatUrlOf(u) {
     u = String(u || '').trim().replace(/\/+$/, '');
@@ -151,13 +149,28 @@
     '信息差铁律：每个 NPC 只知道自己的感知；「你知道但他们不知道的」绝不出现在私信里。\n' +
     '输出格式（必须严格遵守）：每条私信一行，格式为 名字|类型|内容。类型只用 text。不输出任何其他文字、解释或 markdown。\n';
 
-  async function generateDMs(convId, n, reason) {
+  async function generateDMs(convId, n, reason, playerLines) {
     const cfg = getApiCfg();
     if (!cfg) { console.info(TAG, '未配置独立 API，跳过私信生成（手机面板-设置里填写后生效）'); return; }
     const fresh = await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' });
     const sd = fresh.stat_data;
     if (!sd || !sd.phone) return;
     const name = convName(sd, convId);
+
+    // 玩家从发件箱发出的消息先入账（照参考卡：玩家的话进会话记录，NPC 才有回应对象）
+    if (Array.isArray(playerLines) && playerLines.length) {
+      const box0 = (sd.phone.wechat_messages = sd.phone.wechat_messages || {});
+      const entry0 = box0[convId] = box0[convId] || { messages: [] };
+      const list0 = Array.isArray(val(entry0.messages)) ? val(entry0.messages) : (entry0.messages = []);
+      const floor0 = currentFloorSafe();
+      for (const line of playerLines) list0.push({ from: 'player', text: String(line), floor: floor0 });
+      while (list0.length > MAX_MSGS) list0.shift();
+      const convs0 = (sd.phone.wechat_conversations = sd.phone.wechat_conversations || {});
+      const conv0 = convs0[convId] = convs0[convId] || { unread: 0, last_summary: '', suggested_replies: [] };
+      conv0.last_summary = '我：' + String(playerLines[playerLines.length - 1]).slice(0, 40);
+      conv0.dm_pending = true;
+      await window.Mvu.replaceMvuData(fresh, { type: 'message', message_id: 'latest' });
+    }
 
     const messages = [
       { role: 'system', content: SYSTEM_HEAD + '\n【联系人档案】\n' + contactBrief(sd, convId) + '\n【信息差】\n' + asymSummary(sd, convId) },
@@ -192,20 +205,32 @@
     console.info(TAG, '私信已产出 ×' + rows.length + '：', convId);
   }
 
-  // ---------- 触发（机制照参考卡：玩家回复事件 + 每楼事件驱动） ----------
-  async function onPlayerReply(payload) {
+  // ---------- 触发（机制照参考卡：事件排队串行处理，批量发送不丢事件） ----------
+  const queue = [];
+  let busy = false;
+  function enqueue(task) {
+    queue.push(task);
+    pump();
+  }
+  async function pump() {
     if (busy) return;
-    const convId = payload && payload.convId;
-    if (!convId) return;
     busy = true;
-    try { await generateDMs(convId, 1, '玩家刚在微信里回复了你'); } catch (e) {
-      console.warn(TAG, '本楼私信生成静默跳过：', e && (e.message || e));
+    try {
+      while (queue.length) {
+        const task = queue.shift();
+        try { await task(); } catch (e) { console.warn(TAG, '本楼私信生成静默跳过：', e && (e.message || e)); }
+      }
     } finally { busy = false; }
   }
 
-  async function onFloorEnded() {
-    if (busy) return;
-    try {
+  function onPlayerReply(payload) {
+    const convId = payload && payload.convId;
+    if (!convId) return;
+    enqueue(() => generateDMs(convId, 1, payload && payload.reason ? payload.reason : '玩家刚在微信里回复了你', payload && payload.lines));
+  }
+
+  function onFloorEnded() {
+    enqueue(async () => {
       const cfg = getApiCfg();
       if (!cfg) return; // 未配置独立 API：什么都不做
       const sd = (await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' })).stat_data;
@@ -230,12 +255,8 @@
         target = pool[Math.floor(Math.random() * pool.length)];
         reason = evs.length ? '当前事件推进带来的新动向' : '日常往来问候';
       }
-      busy = true;
-      try { await generateDMs(target, 1, reason); } finally { busy = false; }
-    } catch (e) {
-      busy = false;
-      console.warn(TAG, '本楼私信生成静默跳过：', e && (e.message || e));
-    }
+      await generateDMs(target, 1, reason);
+    });
   }
 
   function mount() {
