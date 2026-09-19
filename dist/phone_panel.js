@@ -1,4 +1,5 @@
-// 批条 · 悬浮手机面板 v0.3.0（远程托管 dist/phone_panel.js，卡内运行时加载器 fetch+eval 拉起）
+// 批条 · 悬浮手机面板 v0.3.1（远程托管 dist/phone_panel.js，卡内运行时加载器 fetch+eval 拉起）
+// v0.3.1：修复面板内部点击全灭——拖拽改 document 级手势跟踪（零指针捕获）+面板拖拽限定标题栏（真机真实点击复现根因）
 //
 // 架构对齐参考卡《Sugar Daddy Simulator》的成熟模式（2026-09-19 拆解学习其线上实现）：
 //   悬浮 FAB + 可拖面板（makeDraggable：指针位移阈值合成 tap，不依赖 click 事件——
@@ -122,39 +123,57 @@
     if (pos) { var c = clampXY(pos.x, pos.y); setClientPos(el, c.x, c.y); return; }
     defFn();
   }
-  function makeDraggable(el, handle, storeKey, onTap) {
-    var sx = 0, sy = 0, ox = 0, oy = 0, moved = false, pid = null;
+  // v0.3.1 修复：pointerdown 即 setPointerCapture 会把后续 click 重定向到捕获容器，
+  // 面板内部所有子元素的原生 click 监听全部落空（v0.2.5 悬浮窗同坑复发；真机真实点击复现）。
+  // 方案：完全不使用指针捕获——手势跟踪挂 document（按 pointerId 过滤，任何元素下都能收到
+  // move/up，不依赖指针停留在手柄上）；按下时仅登记待定手势且不 preventDefault，保住子元素
+  // click 与输入框 focus；位移越过 6px 才判定为拖拽，未越阈值抬起按 tap 合成（仅 FAB 用）；
+  // 拖拽/合成后吞掉跟随 click 防误触。gate：面板只允许从标题栏发起拖拽（保住列表滚动与内部交互）。
+  function makeDraggable(el, handle, storeKey, onTap, gate) {
+    var g = null; // 待定手势 {pid, sx, sy, ox, oy, moved}
+    var suppress = null;
+    function armSuppress() {
+      if (suppress) return;
+      suppress = function (ev) { ev.stopPropagation(); ev.preventDefault(); };
+      handle.addEventListener('click', suppress, { capture: true, once: true });
+      setTimeout(function () {
+        if (suppress) { handle.removeEventListener('click', suppress, { capture: true }); suppress = null; }
+      }, 350);
+    }
     handle.addEventListener('pointerdown', function (e) {
-      sx = e.clientX; sy = e.clientY;
-      var r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
-      moved = false; pid = e.pointerId;
-      try { el.setPointerCapture && el.setPointerCapture(e.pointerId); } catch (err) {}
-      e.preventDefault();
+      if (g) return;
+      if (gate && !(e.target && e.target.closest && e.target.closest(gate))) return;
+      var r = el.getBoundingClientRect();
+      g = { pid: e.pointerId, sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
+      // 此刻意不捕获、不 preventDefault：保住子元素 click 与输入框 focus
     });
-    handle.addEventListener('pointermove', function (e) {
-      if (pid === null || e.pointerId !== pid) return;
-      var dx = e.clientX - sx, dy = e.clientY - sy;
-      if (!moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
-      moved = true;
+    DOC.addEventListener('pointermove', function (e) {
+      if (!g || e.pointerId !== g.pid) return;
+      var dx = e.clientX - g.sx, dy = e.clientY - g.sy;
+      if (!g.moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      g.moved = true;
       recalib();
-      var c = clampXY(ox + dx, oy + dy);
+      var c = clampXY(g.ox + dx, g.oy + dy);
       setClientPos(el, c.x, c.y);
       e.preventDefault();
-    });
+    }, true);
     function up(e) {
-      if (pid === null || e.pointerId !== pid) return;
-      pid = null;
-      if (!moved) {
-        var t = e.target;
-        if (onTap && !(t && t.closest && t.closest('button, input, textarea, select, [data-tab], [data-conv], #piaotiao-close, #piaotiao-back, #piaotiao-sendall, #piaotiao-queue'))) onTap(e);
-      } else {
+      if (!g || e.pointerId !== g.pid) return;
+      var wasMoved = g.moved, tap = !wasMoved && onTap;
+      var t = e.target;
+      g = null;
+      if (wasMoved) {
         recalib();
         var r = el.getBoundingClientRect();
         savePos(storeKey, r.left, r.top);
+        armSuppress();
+      } else if (tap && !(t && t.closest && t.closest('button, input, textarea, select, [data-tab], [data-conv], #piaotiao-close, #piaotiao-back, #piaotiao-sendall, #piaotiao-queue'))) {
+        armSuppress();
+        onTap(e);
       }
     }
-    handle.addEventListener('pointerup', up);
-    handle.addEventListener('pointercancel', up);
+    DOC.addEventListener('pointerup', up, true);
+    DOC.addEventListener('pointercancel', up, true);
   }
 
   // ── DOM 宿主 ──
@@ -240,7 +259,7 @@
       panelHost.style.cssText = 'position:fixed;left:30%;top:12%;z-index:9999;display:none;font-family:"Microsoft YaHei",system-ui,sans-serif;';
       DOC.body.appendChild(panelHost);
       applyPos(panelHost, PANEL_KEY, defaultPanelPos);
-      makeDraggable(panelHost, panelHost, PANEL_KEY, null);
+      makeDraggable(panelHost, panelHost, PANEL_KEY, null, '#piaotiao-drag-handle'); // v0.3.1：仅标题栏发起拖拽
       panelEl = DOC.createElement('div');
       panelEl.id = 'piaotiao-phone-panel';
       panelEl.style.cssText = 'width:360px;max-width:94vw;height:600px;max-height:92vh;background:' + C.bg +
