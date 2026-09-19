@@ -45,7 +45,6 @@
   let panelEl = null;
   let currentView = 'wechat';       // wechat | contacts | network | notes
   let currentConv = null;           // 打开的会话 id
-  let pendingReplies = [];          // 当前会话的快捷回复
 
   function ensureHost() {
     const host = window.parent && window.parent.document ? window.parent.document : document;
@@ -87,8 +86,6 @@
     const conv = t.closest('[data-conv]');
     if (conv) { currentConv = conv.getAttribute('data-conv'); render(); return; }
     if (t.closest('#piaotiao-back')) { currentConv = null; render(); return; }
-    const quick = t.closest('[data-quick]');
-    if (quick && lastStat) { const i = Number(quick.getAttribute('data-quick')); if (pendingReplies[i]) sendReply(lastStat, pendingReplies[i]); return; }
     if (t.closest('#piaotiao-send') && lastStat) {
       const input = panelEl.querySelector('#piaotiao-input');
       const text = input ? input.value.trim() : '';
@@ -255,23 +252,28 @@
     render();
   }
 
-  // ---------- 微信 ----------
+  // ---------- 微信（仿微信风格：会话行头像+气泡+尖角+底栏） ----------
+  function avatarDot(name) {
+    return '<span style="flex-shrink:0;width:38px;height:38px;border-radius:6px;background:' + COLORS.mine +
+      ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px;">' + esc(String(name || '?').slice(0, 1)) + '</span>';
+  }
   async function viewWechat(stat) {
+    if (currentConv) return wechatThread(stat, currentConv);
     const convs = stat.phone?.wechat_conversations || {};
-    const msgs = stat.phone?.wechat_messages || {};
-    if (currentConv) return wechatThread(stat, currentConv, msgs[currentConv]);
     const ids = Object.keys(convs);
-    if (!ids.length) return '<div style="padding:24px;color:' + COLORS.dim + ';text-align:center;">暂无会话<br><span style="font-size:12px;">剧情里的微信往来会出现在这里</span></div>';
-    return ids.map((id) => {
+    if (!ids.length) return '<div style="padding:24px;color:' + COLORS.dim + ';text-align:center;font-size:13px;">暂无会话<br><span style="font-size:12px;">剧情里的微信往来会出现在这里</span></div>';
+    return '<div style="background:' + COLORS.bg + ';">' + ids.map((id) => {
       const c = convs[id];
       const name = convName(stat, id);
-      const unread = val(c.unread) || 0;
-      return '<div data-conv="' + esc(id) + '" style="padding:12px 14px;border-bottom:1px solid ' + COLORS.line + ';cursor:pointer;display:flex;justify-content:space-between;align-items:center;">' +
-        '<div><div style="font-size:14px;">' + esc(name) + '</div>' +
-        '<div style="font-size:12px;color:' + COLORS.dim + ';margin-top:3px;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(val(c.last_summary) || '') + '</div></div>' +
-        (unread > 0 ? '<span style="background:' + COLORS.red + ';color:#fff;border-radius:10px;min-width:18px;text-align:center;font-size:11px;padding:2px 5px;">' + unread + '</span>' : '') +
+      const unread = Number(val(c.unread)) || 0;
+      return '<div data-conv="' + esc(id) + '" style="display:flex;gap:10px;align-items:center;padding:10px 12px;border-bottom:1px solid ' + COLORS.line + ';cursor:pointer;">' +
+        avatarDot(name) +
+        '<div style="flex:1;min-width:0;"><div style="display:flex;justify-content:space-between;align-items:baseline;">' +
+        '<span style="font-size:14px;color:' + COLORS.text + ';">' + esc(name) + '</span></div>' +
+        '<div style="font-size:12px;color:' + COLORS.dim + ';margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(val(c.last_summary) || '') + '</div></div>' +
+        (unread > 0 ? '<span style="background:' + COLORS.red + ';color:#fff;border-radius:10px;min-width:18px;text-align:center;font-size:11px;padding:2px 5px;flex-shrink:0;">' + unread + '</span>' : '') +
         '</div>';
-    }).join('');
+    }).join('') + '</div>';
   }
 
   function convName(stat, id) {
@@ -286,27 +288,28 @@
     return id;
   }
 
-  function wechatThread(stat, convId, box) {
+  function wechatThread(stat, convId) {
+    const box = (stat.phone?.wechat_messages || {})[convId];
     const list = (box && Array.isArray(val(box.messages))) ? val(box.messages) : [];
     const conv = (stat.phone?.wechat_conversations || {})[convId] || {};
-    pendingReplies = Array.isArray(val(conv.suggested_replies)) ? val(conv.suggested_replies) : [];
     const name = convName(stat, convId);
+    // 微信风格气泡：对方靠左灰底尖角在下左；我方靠右蓝底尖角在下右
     const items = list.map((m) => {
       const mine = val(m.from) === 'player';
-      return '<div style="display:flex;justify-content:' + (mine ? 'flex-end' : 'flex-start') + ';padding:5px 12px;">' +
-        '<div style="max-width:75%;background:' + (mine ? COLORS.mine : COLORS.theirs) + ';border-radius:10px;padding:8px 10px;font-size:13px;line-height:1.5;">' +
+      return '<div style="display:flex;justify-content:' + (mine ? 'flex-end' : 'flex-start') + ';padding:4px 12px;gap:8px;">' +
+        (mine ? '' : avatarDot(name)) +
+        '<div style="max-width:75%;background:' + (mine ? COLORS.mine : COLORS.theirs) + ';color:' + COLORS.text +
+        ';border-radius:12px;border-' + (mine ? 'bottom-right' : 'bottom-left') + '-radius:3px;padding:8px 12px;font-size:13.5px;line-height:1.55;word-break:break-word;">' +
         esc(val(m.text)) + '</div></div>';
     }).join('');
-    const quick = pendingReplies.length
-      ? '<div style="padding:6px 10px;display:flex;flex-wrap:wrap;gap:6px;">' + pendingReplies.map((r, i) =>
-        '<span data-quick="' + i + '" style="cursor:pointer;border:1px solid ' + COLORS.blue + ';color:' + COLORS.text + ';border-radius:12px;padding:4px 10px;font-size:12px;">' + esc(r) + '</span>').join('') + '</div>'
-      : '';
-    return '<div style="background:' + COLORS.header + ';padding:9px 14px;font-size:13px;cursor:pointer;" id="piaotiao-back">← ' + esc(name) + '</div>' +
-      '<div style="padding:8px 0;">' + (items || '<div style="text-align:center;color:' + COLORS.dim + ';padding:20px;font-size:12px;">暂无消息</div>') + '</div>' +
-      quick +
-      '<div style="display:flex;gap:6px;padding:8px 10px;border-top:1px solid ' + COLORS.line + ';">' +
-      '<input id="piaotiao-input" placeholder="回复' + esc(name) + '…" style="flex:1;background:' + COLORS.panel + ';border:1px solid ' + COLORS.line + ';color:' + COLORS.text + ';border-radius:10px;padding:7px 10px;font-size:13px;outline:none;" />' +
-      '<button id="piaotiao-send" style="background:' + COLORS.blue + ';border:none;color:#fff;border-radius:10px;padding:7px 14px;cursor:pointer;font-size:13px;">发送</button></div>';
+    return '<div style="display:flex;flex-direction:column;height:100%;">' +
+      '<div style="background:' + COLORS.header + ';padding:9px 14px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;flex-shrink:0;" id="piaotiao-back">' +
+      '<span style="color:' + COLORS.dim + ';font-size:16px;">‹</span>' + esc(name) + '</div>' +
+      '<div style="flex:1;overflow-y:auto;padding:10px 0;display:flex;flex-direction:column;gap:4px;">' +
+      (items || '<div style="text-align:center;color:' + COLORS.dim + ';padding:20px;font-size:12px;">暂无消息</div>') + '</div>' +
+      '<div style="display:flex;gap:6px;padding:8px 10px;border-top:1px solid ' + COLORS.line + ';background:' + COLORS.header + ';flex-shrink:0;">' +
+      '<input id="piaotiao-input" placeholder="发消息…" autocomplete="off" style="flex:1;background:' + COLORS.bg + ';border:1px solid ' + COLORS.line + ';color:' + COLORS.text + ';border-radius:8px;padding:7px 10px;font-size:13px;outline:none;" />' +
+      '<button id="piaotiao-send" style="background:' + COLORS.green + ';border:none;color:#123;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px;font-weight:bold;">发送</button></div></div>';
   }
 
   // 玩家回复：只写 phone 子树（读-改-写最新 stat_data，防竞态），打 pending 标记给私信生成器
@@ -327,8 +330,8 @@
       conv.suggested_replies = [];
       conv.dm_pending = true; // 私信生成器：玩家已回复，待产出 NPC 回信
       await Mvu.replaceMvuData(fresh, { type: 'message', message_id: 'latest' });
-      // replaceMvuData 不触发 VUE → 踢一下私信生成器（同 iframe，kick 事件）
-      try { (window.__piaotiaoDmKick || (() => window.dispatchEvent(new Event('piaotiao_dm_kick'))))(); } catch (e) { console.warn(TAG, '私信生成器踢取失败', e); }
+      // replaceMvuData 不触发 VUE → 按参考卡机制发事件唤起私信生成器
+      try { window.dispatchEvent(new CustomEvent('piaotiao_request_dm', { detail: { convId } })); } catch (e) { console.warn(TAG, '私信触发失败', e); }
       reportInfo('回复已入账：' + convId);
       render();
     } catch (e) { reportError('回复写入失败', e); }
