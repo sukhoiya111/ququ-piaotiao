@@ -92,6 +92,13 @@
     }
     dragState.el = null;
   }
+  // 拖动把手命中判断：交互控件不抢拖动（点击仍走 click 委托）
+  function t2(e) {
+    const el = e.target;
+    if (!el || !el.closest) return false;
+    if (el.closest('#piaotiao-input, #piaotiao-send, #piaotiao-close, [data-tab], [data-conv], #piaotiao-back, #piaotiao-sendall, #piaotiao-queue, button, input, textarea, select, .piao-mask')) return false;
+    return !!el.closest('#piaotiao-drag-handle, #piaotiao-phone-btn');
+  }
 
   // ---------- 数据读取（只读投影） ----------
   async function readStat() {
