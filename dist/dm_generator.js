@@ -1,322 +1,740 @@
-// 批条 · 私信生成器（远程托管 dist/dm_generator.js，由卡内运行时加载器 fetch+eval 拉起）
-//
-// 机制照抄参考卡《Sugar Daddy Simulator》dm_generator（2026-09-19 拆解其线上脚本）：
-//   - 触发：面板玩家回复 → 自定义事件 piaotiao_request_dm；正文楼结算（VUE）→ 事件相关联系人主动来信
-//   - 生成：独立 API 直连 fetch（callIndependent，chatUrlOf 规范化，temperature 1.0，不带 max_tokens）
-//   - 输出：`名字|text|内容` 行格式（对思考模型/噪声远比 JSON 健壮），<think> 与 ``` 围栏预清洗
-//   - 写回：v0.2.6 起私信/会话真源在 TH 聊天级变量 piaotiao_phone（读-改-写，竞态保护）；
-//     楼层 stat_data.phone 由账房每楼嫁接投影；失败静默跳过，保持待答标记
-// 【硬性边界】聊天 API 仅供酒馆正文 RP——本脚本没有也不允许有主 API 回退路径（用户明令 2026-09-19）：
-//   未配置独立 API（面板-设置）则完全不生成。
 (function () {
-  'use strict';
-  const TAG = '[批条·私信]';
-  if (window.__PiaotiaoDmGenerator) { console.info(TAG, '已挂载，跳过重复初始化'); return; }
+'use strict';
+// 批条 · 私信生成器 v0.3.0（远程托管 dist/dm_generator.js，卡内运行时加载器 fetch+eval 拉起）
+//
+// 架构对齐参考卡《Sugar Daddy Simulator》的成熟模式（2026-09-19 拆解学习其线上实现）：
+//   聊天级变量单一真源 + 串行写队列 + 事件驱动 + injectPrompts 主线感知 + 队列合并/补漏/strict 重试。
+//   代码为本卡原创实现；未搬运参考卡代码文本（其声明「可读可学，禁止直接搬运」）。
+//
+// 【硬性边界】聊天 API 仅供酒馆正文 RP——参考卡用 generateRaw 走主 API 的路线与本卡绝不相容
+// （2026-09-19 实证：脚本调用主 API 曾致封号、余额透支）。本引擎只用玩家自填的独立 API；
+// 未配置则完全不生成，无任何主 API 回退路径。
+//
+// 自包含：无 import、无 CDN、无 MVU 依赖。只用酒馆助手全局：
+//   getVariables / updateVariablesWith / getChatMessages / getCharWorldbookNames / getWorldbook /
+//   injectPrompts / uninjectPrompts / eventOn / eventEmit / getPersona / substitudeMacros
+'use strict';
 
-  const val = (v) => (Array.isArray(v) && v.length === 2 && typeof v[1] === 'string' ? v[0] : v);
-  const isPair = (v) => Array.isArray(v) && v.length === 2 && typeof v[1] === 'string';
-  const wrapLike = (old, v) => (isPair(old) ? [v, old[1]] : v);
-  const MAX_MSGS = 30;
-  const VALID_TYPES = ['text', 'voice', 'transfer', 'sticker', 'image'];
+var PT_TAG = '[批条·私信]';
+if (window.__PiaotiaoDmGenerator) { console.info(PT_TAG, '已挂载，跳过重复初始化'); return; }
 
-  // ---------- 聊天级真源（v0.2.6，机制同 phone_panel.js） ----------
-  // 楼层变量按 楼层×swipe 双键存且 swipe 会从上一楼重算（bundle Qo/At + 聊天文件实证），
-  // 写入不在 <UpdateVariable> 文本里就会蒸发；流式期间写入会被 VUE 落盘覆盖。
-  // 故私信/会话真源在 TH 聊天级变量 piaotiao_phone；账房每楼嫁接进楼层投影供模型看见。
-  const CHAT_PHONE_KEY = 'piaotiao_phone';
-  async function chatVars() {
-    if (typeof getVariables !== 'function') throw new Error('getVariables 不可用（酒馆助手未就绪）');
-    const cv = await getVariables({ type: 'chat' });
-    return (cv && typeof cv === 'object') ? cv : {};
-  }
-  function ensurePhoneShape(p) {
-    const o = (p && typeof p === 'object') ? p : {};
-    o.wechat_conversations = o.wechat_conversations || {};
-    o.wechat_messages = o.wechat_messages || {};
-    return o;
-  }
-  let _saveTimer = null;
-  function scheduleChatSave() { // v0.2.6 实证：replaceVariables 不触发聊天保存，不补这一脚关页就丢
-    try {
-      if (_saveTimer) clearTimeout(_saveTimer);
-      _saveTimer = setTimeout(() => {
-        try { window.SillyTavern && window.SillyTavern.saveChat && window.SillyTavern.saveChat(); } catch (e) { /* 保存失败不阻塞 */ }
-      }, 800);
-    } catch (e) { /* 不阻塞 */ }
-  }
-  function lockChatWrite(run) { // 与面板/账房共享同一把链式锁（同 iframe 全局链），串行化聊天级写
-    const w = window;
-    const p = (w.__piaotiaoCvChain || Promise.resolve()).then(run, run);
-    w.__piaotiaoCvChain = p.then(() => {}, () => {});
-    return p;
-  }
-  async function readPhoneTruth() {
-    return ensurePhoneShape((await chatVars())[CHAT_PHONE_KEY]);
-  }
-  async function mutatePhone(fn) { // 读-改-写；全局写锁串行化（防并发整对象覆盖，v0.2.6 真机实证）
-    await lockChatWrite(async () => {
-      const cv = await chatVars();
-      const p = ensurePhoneShape(cv[CHAT_PHONE_KEY]);
-      cv[CHAT_PHONE_KEY] = p;
-      fn(p);
-      await replaceVariables(cv, { type: 'chat' });
-    });
-    scheduleChatSave();
-  }
+// ── 小工具 ──
+function ptEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function ptNow() {
+  var d = new Date();
+  function p2(n) { return (n < 10 ? '0' : '') + n; }
+  return p2(d.getHours()) + ':' + p2(d.getMinutes());
+}
+function ptLsGet(k) { try { var st = (typeof parent !== 'undefined' && parent.localStorage) ? parent.localStorage : localStorage; return st.getItem(k); } catch (e) { return null; } }
+function ptLsSet(k, v) { try { var st = (typeof parent !== 'undefined' && parent.localStorage) ? parent.localStorage : localStorage; st.setItem(k, v); } catch (e) {} }
+function ptNotify(kind, msg) { try { toastr[kind](msg, '批条 · 手机'); } catch (e) { console.info(PT_TAG, msg); } }
 
-  // ---------- 独立 API（照抄参考卡 callIndependent / chatUrlOf） ----------
-  function chatUrlOf(u) {
-    u = String(u || '').trim().replace(/\/+$/, '');
-    if (/\/chat\/completions$/.test(u)) return u;
-    if (/\/v\d+$/.test(u)) return u + '/chat/completions';
-    return u + '/v1/chat/completions';
-  }
-  function getApiCfg() {
-    let cfg = null;
-    try { cfg = JSON.parse(localStorage.getItem('piaotiao_dm_api') || 'null'); } catch (e) { cfg = null; }
-    const url = cfg && (cfg.url || cfg.apiurl); // 兼容旧字段名
-    if (!url || !cfg.key) return null;
-    return { url, key: cfg.key, model: cfg.model || '' };
-  }
-  async function callIndependent(cfg, messages) {
-    const body = { model: cfg.model || 'gpt-4o-mini', messages, temperature: 1.0 };
-    const resp = await fetch(chatUrlOf(cfg.url), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.key },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      let errText = '';
-      try { errText = (await resp.text()).slice(0, 100); } catch (e) {}
-      throw new Error('HTTP ' + resp.status + ' ' + errText);
+// ── 聊天级变量：读 + 串行写闸（参考卡同款结论：updateVariablesWith 是读→改→异步写，
+//    两次贴太近第二次会读到旧状态把人家的写覆盖掉——所有写排队过闸） ──
+var _updQ = Promise.resolve();
+function ptUpdate(fn) {
+  _updQ = _updQ.then(function () { return updateVariablesWith(fn, { type: 'chat' }); })
+    .catch(function (e) { console.error(PT_TAG, '写变量失败', e); ptNotify('error', '写变量失败: ' + ((e && e.message) || e)); });
+  return _updQ;
+}
+function ptRead() { try { return getVariables({ type: 'chat' }) || {}; } catch (e) { return {}; } }
+
+// ── MVU 账本只读（contacts/families/player 的唯一真源在 stat_data，这里只读不写） ──
+function ptStatData() {
+  try {
+    var mid = null;
+    try { if (typeof getLastMessageId === 'function') mid = getLastMessageId(); } catch (e0) {}
+    var v = getVariables({ type: 'message', message_id: (mid != null ? mid : 0) });
+    var sd = v && v.stat_data;
+    if (!sd && mid !== 0) { try { v = getVariables({ type: 'message', message_id: 0 }); sd = v && v.stat_data; } catch (e2) {} }
+    return (sd && typeof sd === 'object') ? sd : null;
+  } catch (e) { return null; }
+}
+function ptBare(v) { return (Array.isArray(v) && v.length === 2 && typeof v[1] === 'string') ? v[0] : v; }
+
+// ── 固定联系人的"声音卡"（私信精简版；完整档案在世界书，按点名上车） ──
+var PT_VOICES = {
+  '陈国邦': '陈国邦，52岁，建材起家的民营老板，陈家一家之主。开局求办儿子名校名额。迷信关系不信合同，口头禅"您看这事，多少是个意思"。私信里客气但不遮遮掩掩，急事直说，爱用"您"，从不催命只说"劳您费心"。嫌烦也端着： Line短，一条一个事。',
+  '王敬明': '王敬明，54岁，省教育厅基教处副处长，人称王处。圆滑×谨慎，笑起来像弥勒佛。从不报价，报价的是你的悟性；私信里客客气气打太极，从不落把柄，从不写数字，事情全在"回头吃饭细说"。怕老婆是真的怕。',
+  '周之桐': '周之桐，45岁，留学机构「枫桥路」实际控制人，人称周律。精确×清高，无框眼镜。谈生意像问诊：先问三个问题再谈钱。小额收钱，大额换信息；最想要对等的秘密。私信简短、句句在点上，偶尔冷不丁透露一点别人的事当见面礼。',
+  '白景舟': '白景舟，49岁，某文化艺术基金会秘书长，人称白秘书长。恋权×好色（全留在水面下）。不谈帮忙，谈缘分。私信文雅周到，爱用书面语和省略号，从不明说，一切安排都"顺其自然"——时间地点都他定，深夜发出。',
+  '蔡满仓': '蔡满仓，58岁，「金满堂」商K老板，信息贩子，人称老蔡。贫豪×重情（危险），手腕上佛珠金表各一。什么都用酒局谈，口头禅"小事小事"。私信热络得像老友，爱发语音，三句不离"有个好玩的事"，情报真假九真一假。',
+  '方岚': '方岚，41岁，市审计系统专项处副处长，人称方检。精确×谨慎，短发，全身上下没有一件衣服在讲故事。不收礼、不吃饭、不给面子任何进度条，但讲规则：规则内可以慢，可以"再核一遍"。私信极简，一句是一句，从不寒暄，回复慢但准。',
+};
+
+// ── 世界书素材直读（单一真源：改条目=私信同步生效） ──
+var _wbCache = null, _wbAt = 0;
+async function ptWbEntries() {
+  if (_wbCache && Date.now() - _wbAt < 5 * 60 * 1000) return _wbCache;
+  try {
+    var names = await getCharWorldbookNames('current');
+    if (names && names.primary) {
+      var entries = await getWorldbook(names.primary);
+      if (entries && entries.length) { _wbCache = entries; _wbAt = Date.now(); }
     }
-    const json = await resp.json();
-    return (json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
+  } catch (e) { console.warn(PT_TAG, '世界书读取失败', e); }
+  return _wbCache || [];
+}
+async function ptWbContent(nameSub, fallback) {
+  var es = await ptWbEntries();
+  for (var i = 0; i < es.length; i++) {
+    if (es[i].enabled === false) continue;
+    var nm = String(es[i].comment || es[i].name || '');
+    if (nm.indexOf(nameSub) !== -1) return es[i].content || fallback;
   }
+  return fallback;
+}
+// 点名联系人 → 完整档案条目名（worldbook comment 精确匹配）
+var PT_WB_KEY = {
+  '王敬明': '联系人档案·王敬明', '周之桐': '联系人档案·周之桐', '白景舟': '联系人档案·白景舟',
+  '蔡满仓': '联系人档案·蔡满仓', '方岚': '联系人档案·方岚', '陈国邦': '家庭档案',
+};
 
-  // ---------- 行格式解析（照抄参考卡 parseDMs 的健壮性处理） ----------
-  function parseDMs(raw) {
-    const rows = [];
-    const text = String(raw || '')
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/^```[a-z]*\s*$/gim, '');
-    const lines = text.split('\n');
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t) continue;
-      if (t.charAt(0) === '<') break; // 生成器输出的噪声标签行 → 停止
-      const parts = t.split('|');
-      const name = (parts[0] || '').trim().replace(/^[-*•\d.\s]+/, '');
-      const type = parts.length >= 3 ? parts[1].trim().toLowerCase() : '';
-      const isRow = !!name && parts.length >= 3 && VALID_TYPES.indexOf(type) !== -1;
-      if (isRow) {
-        rows.push({ name, type, raw: parts.slice(2).join('|').trim() });
-      } else if (rows.length && (rows[rows.length - 1].type === 'text' || rows[rows.length - 1].type === 'voice')) {
-        // 长私信被换行拆开的续段 → 拼回上一条
-        const last = rows[rows.length - 1];
-        if ((last.raw.length + t.length) < 3000) last.raw += '\n' + t;
+// ── 玩家身份（酒馆人设为唯一可信来源，没填就留白） ──
+function ptIdentity() {
+  var name = '', persona = '';
+  try { if (typeof getPersona === 'function') { var pp = getPersona('current'); if (pp) { name = String(pp.name || '').trim(); persona = String(pp.description || '').trim(); } } } catch (e) {}
+  try { if (!name && typeof substitudeMacros === 'function') name = String(substitudeMacros('{{user}}') || '').trim(); } catch (e) {}
+  try { if (!persona && typeof substitudeMacros === 'function') persona = String(substitudeMacros('{{persona}}') || '').trim(); } catch (e) {}
+  if (/^\{\{[^}]*\}\}$/.test(name)) name = '';
+  if (/^\{\{[^}]*\}\}$/.test(persona)) persona = '';
+  return { name: name, persona: persona };
+}
+
+// ── 主线最近散文（私信的眼睛；层数×字数预算，砍太狠=手机不读正文） ──
+function ptCleanProse(t) {
+  return String(t || '')
+    .replace(/<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi, '')
+    .replace(/<Analysis>[\s\S]*?<\/Analysis>/gi, '')
+    .replace(/<initvar>[\s\S]*?<\/initvar>/gi, '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/<[^>]{1,80}>/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+async function ptRecentPlot() {
+  try {
+    var arr = await getChatMessages('0-{{lastMessageId}}');
+    if (!arr || !arr.length) return '';
+    var nFloors = parseInt(ptLsGet('piaotiao_plot_n'), 10); if (!(nFloors > 0)) nFloors = 6;
+    var lines = arr.slice(-nFloors).map(function (m) {
+      var t = ptCleanProse(m.message);
+      if (!t) return '';
+      return (m.is_user || m.role === 'user' ? '我' : '正文') + '：' + t;
+    }).filter(Boolean).join('\n');
+    var cap = nFloors * 900;
+    return lines.length > cap ? lines.slice(-cap) : lines;
+  } catch (e) { return ''; }
+}
+// 谁在剧情里被提到（纯文本扫描，零额外调用）
+function ptInScene(plot) {
+  if (!plot) return [];
+  var hay = plot.toLowerCase();
+  var hits = [];
+  var names = [];
+  var sd = ptStatData();
+  if (sd) {
+    for (var cid in (sd.contacts || {})) { var c = sd.contacts[cid]; var n = ptBare(c && c.name); if (n && names.indexOf(n) === -1) names.push(n); }
+    for (var fid in (sd.families || {})) {
+      var f = sd.families[fid];
+      ['head', 'spouse'].forEach(function (role) { var n2 = f[role] && ptBare(f[role].name); if (n2 && names.indexOf(n2) === -1) names.push(n2); });
+      for (var kid in (f.children || {})) { var n3 = ptBare(f.children[kid] && f.children[kid].name); if (n3 && names.indexOf(n3) === -1) names.push(n3); }
+    }
+  }
+  for (var key in PT_VOICES) { if (names.indexOf(key) === -1) names.push(key); }
+  var npcs = (ptRead().pt && ptRead().pt.npcs) || {};
+  for (var k in npcs) { var nm = String(npcs[k] && npcs[k].name || k); if (names.indexOf(nm) === -1) names.push(nm); }
+  for (var i = 0; i < names.length; i++) {
+    var tok = String(names[i]).toLowerCase();
+    if (tok.length >= 2 && hay.indexOf(tok) !== -1 && hits.indexOf(names[i]) === -1) hits.push(names[i]);
+  }
+  return hits;
+}
+
+// ── 独立 API（唯一生成通道；配置存 parent localStorage，不进聊天文件） ──
+function ptApiCfg() {
+  try {
+    var store = (typeof parent !== 'undefined' && parent.localStorage) ? parent.localStorage : localStorage;
+    var raw = store.getItem('piaotiao_dm_api');
+    var cfg = raw ? JSON.parse(raw) : null;
+    var url = cfg && (cfg.url || cfg.apiurl);
+    if (cfg && url && cfg.key) return { url: url, key: cfg.key, model: cfg.model || '' };
+  } catch (e) {}
+  return null;
+}
+function ptChatUrlOf(u) {
+  u = String(u || '').trim().replace(/\/+$/, '');
+  if (/\/chat\/completions$/.test(u)) return u;
+  if (/\/v\d+$/.test(u)) return u + '/chat/completions';
+  return u + '/v1/chat/completions';
+}
+async function ptCallApi(cfg, ordered, instr) {
+  var messages = [];
+  for (var i = 0; i < ordered.length; i++) messages.push({ role: ordered[i].role, content: ordered[i].content });
+  messages.push({ role: 'user', content: instr });
+  var body = { model: cfg.model || 'gpt-4o-mini', messages: messages, temperature: 1.0 };
+  var resp = await fetch(ptChatUrlOf(cfg.url), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.key },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    var errText = ''; try { errText = (await resp.text()).slice(0, 120); } catch (e) {}
+    throw new Error('HTTP ' + resp.status + ' ' + errText);
+  }
+  var json = await resp.json();
+  return (json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
+}
+
+// ── 限速闸（保护独立 API 端点；被限就等，不丢请求） ──
+var _callTimes = [];
+var RATE_WINDOW = 60 * 1000, RATE_MAX = 8;
+async function ptWaitSlot() {
+  for (;;) {
+    var now = Date.now();
+    _callTimes = _callTimes.filter(function (t) { return now - t < RATE_WINDOW; });
+    if (_callTimes.length < RATE_MAX) { _callTimes.push(now); return; }
+    var waitMs = RATE_WINDOW - (now - _callTimes[0]) + 300;
+    await new Promise(function (r) { setTimeout(r, waitMs); });
+  }
+}
+
+// ── 会话 id 规范 = 人名（固定联系人/家庭成员/陌生人统一；避免 id 歧义劈开会话） ──
+var PT_ALIAS = { 'chen_guobang': '陈国邦' };   // v0.3.0 初版种子曾用的楼层 id → 正名
+function ptCanon(name) {
+  name = String(name || '').trim();
+  var sd = ptStatData() || {};
+  for (var id in (sd.contacts || {})) { var n = String(ptBare((sd.contacts[id] || {}).name) || '').trim(); if (n && n === name) return n; }
+  for (var fid in (sd.families || {})) { var f = sd.families[fid]; var hn = f.head && ptBare(f.head.name); if (hn && String(hn) === name) return String(hn); }
+  for (var vk in PT_VOICES) { if (vk === name) return vk; }
+  if (PT_ALIAS[name]) return PT_ALIAS[name];
+  return name;
+}
+function ptMergeFrags(v) { // 合并同名碎片（历史键混用过 family id/名字）；返回重命名清单
+  var renamedAll = [];
+  var npcs = v.pt && v.pt.npcs; if (!npcs) return renamedAll;
+  var groups = {};
+  for (var id in npcs) {
+    if (!npcs.hasOwnProperty(id)) continue;
+    var nm = String((npcs[id] && npcs[id].name) || id).trim();
+    var key = ptCanon(nm);
+    if (key === nm && id !== nm) { var k2 = ptCanon(id); if (k2 !== id) key = k2; }
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(id);
+  }
+  var renamed = [];
+  for (var key2 in groups) {
+    var ids = groups[key2];
+    if (ids.length < 2 && ids[0] === key2) continue;
+    ids.sort(function (a, b) { return (npcs[a].last_ts || 0) - (npcs[b].last_ts || 0); });
+    var merged = { name: key2, unread: 0, dm_history: [], last_ts: 0, last_message: '', muted: false, archetype: '' };
+    for (var i2 = 0; i2 < ids.length; i2++) {
+      var n2 = npcs[ids[i2]];
+      merged.dm_history = merged.dm_history.concat(n2.dm_history || []);
+      merged.unread += (n2.unread || 0);
+      if ((n2.last_ts || 0) > merged.last_ts) { merged.last_ts = n2.last_ts; merged.last_message = n2.last_message; }
+      merged.muted = merged.muted || !!n2.muted;
+      merged.archetype = merged.archetype || n2.archetype || '';
+    }
+    merged.dm_history.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
+    if (merged.dm_history.length > 400) merged.dm_history = merged.dm_history.slice(-400);
+    for (var i3 = 0; i3 < ids.length; i3++) delete npcs[ids[i3]];
+    npcs[key2] = merged;
+    renamed.push(ids.join('+') + '→' + key2);
+  }
+  if (renamed.length) console.info(PT_TAG, '合并同名会话:', renamed.join(', '));
+  return renamed.concat(renamedAll);
+}
+// ── 会话记录（pt.npcs[id]，id=人名） ──
+function ptEnsureNpc(v, id, name) {
+  if (!v.pt) v.pt = {};
+  if (!v.pt.npcs) v.pt.npcs = {};
+  if (!v.pt.npcs[id]) {
+    v.pt.npcs[id] = { id: id, name: name || id, unread: 0, dm_history: [], last_ts: 0, last_message: '', muted: false, persistent: false };
+  }
+  if (name && v.pt.npcs[id].name !== name) v.pt.npcs[id].name = name;
+  return v.pt.npcs[id];
+}
+function ptPushThem(sb, id, name, type, content) {
+  var npc = ptEnsureNpc(sb, id, name);
+  npc.dm_history.push({ sender: 'THEM', time: ptNow(), ts: Date.now(), type: type || 'text', content: String(content || '') });
+  if (npc.dm_history.length > 400) npc.dm_history = npc.dm_history.slice(-400);
+  npc.last_ts = Date.now();
+  npc.last_message = type === 'recall' ? '撤回了一条消息' : ((type && type !== 'text' ? '[' + type + '] ' : '') + String(content || '').substring(0, 50));
+  npc.unread = (npc.unread || 0) + 1;
+}
+function ptPushMe(sb, id, name, text) {
+  var npc = ptEnsureNpc(sb, id, name);
+  npc.dm_history.push({ sender: 'ME', time: ptNow(), ts: Date.now(), type: 'text', content: String(text || '') });
+  if (npc.dm_history.length > 400) npc.dm_history = npc.dm_history.slice(-400);
+  npc.last_ts = Date.now();
+  npc.last_message = String(text || '').substring(0, 50);
+}
+function ptRecentMessages(v, id, n) {
+  var npcs = (v.pt && v.pt.npcs) || {};
+  var rec = npcs[id] && npcs[id].dm_history || [];
+  return rec.slice(-n).map(function (m) { return (m.sender === 'ME' ? '我' : (npcs[id] ? npcs[id].name : id)) + '：' + (m.type === 'recall' ? '（撤回了一条消息）' : String(m.content || '')); });
+}
+
+// ── 账本概况 → 文本（describeState 批条版：影响力/资金/保护伞/暴露/人情） ──
+function ptDescribeState() {
+  var sd = ptStatData() || {};
+  var lines = [];
+  lines.push('【手机时钟】现在是 ' + ptNow() + '（深夜像深夜，清晨像清晨）');
+  var uid = ptIdentity();
+  lines.push('【玩家档案】');
+  if (uid.name) lines.push('名字: ' + uid.name);
+  if (uid.persona) lines.push('玩家写的人设（关于他的唯一可信设定，别另编）:\n' + uid.persona.slice(0, 1000));
+  var player = sd.player || {};
+  function num(x) { var n = ptBare(x); return (n == null || n === '') ? null : n; }
+  if (num(player.influence) != null) lines.push('影响力: ' + num(player.influence) + '/100');
+  if (num(player.capital) != null) lines.push('可动用资金: ¥' + Number(num(player.capital) || 0).toLocaleString('zh-CN'));
+  if (num(player.protection) != null) lines.push('保护伞: ' + num(player.protection) + '/5');
+  var d = sd.derived || {};
+  if (num(d.exposure_global) != null) lines.push('暴露风险: ' + num(d.exposure_global) + '/100（越高越接近败露）');
+  if (num(d.favors_balance) != null) lines.push('人情余额: ' + num(d.favors_balance) + '（正=别人欠我）');
+  // 联系人名录（身份+态度，供"谁该来信"判断；档案细节按点名上车）
+  var cs = sd.contacts || {};
+  var cl = [];
+  for (var id in cs) {
+    var c = cs[id];
+    cl.push('· ' + (ptBare(c.name) || id) + '（' + (ptBare(c.status) || '?') + '，态度' + (ptBare(c.attitude) || '?') + '）：想要' + (ptBare(c.wants) || '—') + '，能办' + (ptBare(c.can_provide) || '—'));
+  }
+  if (cl.length) lines.push('【通讯录·体制联系人】\n' + cl.join('\n'));
+  var fams = sd.families || {};
+  var fl = [];
+  for (var fid in fams) {
+    var f = fams[fid];
+    var head = f.head || {};
+    var req = f.request ? (ptBare(f.request.type) + '/' + ptBare(f.request.status)) : '无';
+    fl.push('· ' + (ptBare(f.name) || fid) + '家：一家之主' + (ptBare(head.name) || '?') + '（关系' + (ptBare(head.relationship) || 0) + '），进行中请求=' + req + '，家庭暴露=' + (ptBare(f.exposure_risk) || 0));
+  }
+  if (fl.length) lines.push('【在办家庭】\n' + fl.join('\n'));
+  return lines.join('\n');
+}
+
+// ── 提示词组装 ──
+var PT_FORMAT_RULES =
+  '【输出格式·铁律】只输出私信，每条占一行，格式严格为：\n' +
+  '名字|类型|内容\n' +
+  '- 类型只能是 text / voice / image / transfer / recall 之一\n' +
+  '- 语音 image 不存在实体文件：voice 的内容写这段语音的质感（语气/说了什么/背景音，如 名字|voice|背景音是工地打桩，声音压得很低，说…）；image 的内容写一张照片的画面描述\n' +
+  '- transfer 的内容只填金额数字（打点/送礼/预付，数字不带单位）\n' +
+  '- recall（稀用，一个月两三次）：名字|recall|他没说出口的那句话——手机上只显示"撤回了一条消息"，User 看不到内容\n' +
+  '- 一条私信永远只占一行——再长也绝不换行，用句号和空格连着写\n' +
+  '- 严禁输出任何叙事、旁白、环境描写、心理描写、解释、标题；严禁代替 User 说话或回复\n' +
+  '- 严禁复读：这个人自己说过的话、发过的邀约，绝不换个说法再发一遍；没有新话可说的人这一轮就沉默';
+
+async function ptBuildPrompt(sb, plot, n, reason, strict) {
+  var sd = ptStatData() || {};
+  // 声音卡：固定联系人全员上车
+  var voiceCard = Object.keys(PT_VOICES).map(function (k) { return '· ' + PT_VOICES[k]; }).join('\n');
+  // 随机素材：直读世界书「群像库·体制众生」
+  var randomGuide = await ptWbContent('群像库', '（群像库条目未读到：按 S 市各职能口现编——处/科/局/委办/国企/学校医院，配【性格两词】×【软肋】×【把柄方向】，姓氏+职务做称呼，绝不重名）');
+  var sys1 =
+    '你是「批条」模拟器里"手机私信"的生成器。背景：User 是 S 市的地下掮客，专为有权有钱的家庭解决「棘手问题」（名校名额/艺术留学/签证移民）。任务：生成几条 NPC 发给 User 的微信私信。\n\n' +
+    '【文风铁律】冷冰冰的礼貌，客气但暗藏内容；威胁用请托句式；陈述句，不用感叹号；1-3 句一条，像真的体制内微信。所有人都在体制内外边缘行走：话不说满、事不落纸、钱不过账面。\n\n' +
+    '【固定联系人的声音】每个人必须用自己的语气，不要混：\n' + voiceCard + '\n\n' +
+    '【随机NPC素材库】体制众生按 职能口×性格×软肋×把柄方向 自由组合现抽，称呼用「姓+职务」：\n' + String(randomGuide).slice(0, 2500) + '\n\n' +
+    '【开口要五花八门】不只"在吗"——有的直接递话（「有个事，电话里说不方便」）、有的试探口风（「最近上面查得严啊」）、有的求办事、有的送消息当投名状、有的来还人情。开口方式本身就是这个人的名片。\n\n' +
+    '【人设边界·铁律】每个 NPC 只知道自己那条线；「你知道但他们不知道的」绝不出现在私信里。\n' +
+    '【在场铁律】别的角色在剧情里做了什么——只有正文里出现TA名字或 User 告诉过TA，TA才知道；否则只能像局外人那样问「最近怎么样」。\n' +
+    '【信息隔离·铁律】谁都看不到 User 的手机和账本——不知道他的余额、他还在跟谁聊、别人的把柄强度。⛔ 不许说"听说你还有别的客户""你上周替谁办的"。各自只知道：自己和他说过的话、他当面做的事、自己亲眼看见的。\n\n' +
+    '【User侧动作】他可能：发语音[voice]（对方听到的是内容和语气）；发图片[image]（材料照片/收据截图，按画面理解）；转账[transfer]（打点/预付——体制内的人对钱都敏感，收得矜持或干脆不接，绝不当场道谢收到甜甜）；撤回[recall]（TA只知道他撤回了，永远看不到内容——追问还是装大度，按人设）。每一样都要有反应，别当没发生。\n' +
+    '【平台设定·铁律】这是私人工作微信：敢谈事、敢谈价、敢谈人，但绝不留下字据——能当面说的绝不打字，打了字的也是暗语（「那个东西」「上次的数」「老地方」）。体制内的人句句设防是本能：不写全名、不写学校、不写金额精确数。\n' + PT_FORMAT_RULES + '\n';
+  var ordered = [
+    { role: 'system', content: sys1 },
+    { role: 'system', content: ptDescribeState() },
+  ];
+  if (plot) ordered.push({ role: 'system', content: '【主线最近剧情，私信可呼应但不要复述】\n' + plot });
+  // 点名联系人 → 完整档案上车（回信人设密度=主线同级）
+  if (reason) {
+    for (var fk in PT_WB_KEY) {
+      if (PT_WB_KEY.hasOwnProperty(fk) && reason.indexOf(fk) !== -1) {
+        var dossier = await ptWbContent(PT_WB_KEY[fk], '');
+        if (dossier) ordered.push({ role: 'system', content: '【' + fk + ' 的完整档案（回信必须贴合这份人设）】\n' + String(dossier).slice(0, 4000) });
+        break;
       }
     }
-    return rows;
   }
+  // 闭集锁：点名回信时关掉陌生人通道（防串号乱回）
+  var soloLock = !!reason && /别人不要出现|别的角色不要出现|只让 .+ 本人回应|没被点名的人这一轮不出现|绝不替别人回/.test(reason);
+  // 刷新守则：下拉刷新≠让所有人表演
+  var isRefresh = !!reason && reason.indexOf('玩家刷新手机') !== -1;
+  var refreshHint = isRefresh
+    ? '【刷新守则】这只是玩家下拉刷新，不是让所有人表演：已认识的人只有剧情有新进展、或TA真有新鲜事时才发消息，没有就一个字不发。本轮可以只有 0-2 条。'
+    : '';
+  // 等待回复名单：上一条是 NPC 发的还没得到 User 回复 → 不许追发（真人会干等）
+  var waiting = [];
+  var npcsW = (sb && sb.npcs) || {};
+  for (var wk in npcsW) {
+    if (!npcsW.hasOwnProperty(wk)) continue;
+    var wh = npcsW[wk].dm_history || [];
+    if (wh.length && wh[wh.length - 1].sender === 'THEM') waiting.push(npcsW[wk].name);
+  }
+  var waitHint = waiting.length ? '【等待回复中，本轮禁止再发：' + waiting.join('、') + '】他们上一条还没得到回复，正常人会干等。例外：手头有事相求的人可以厚脸皮追一条。' : '';
+  // 冷处理名单
+  var mutedList = [];
+  for (var mk in npcsW) { if (npcsW.hasOwnProperty(mk) && npcsW[mk].muted) mutedList.push(npcsW[mk].name); }
+  var mutedHint = mutedList.length ? '【被User冷处理，绝对禁止发消息：' + mutedList.join('、') + '】' : '';
+  var onstage = soloLock ? [] : ptInScene(plot);
+  var stageHint = onstage.length ? '【此刻剧情里出现/被提到的人：' + onstage.join('、') + '】这几条里最好有人呼应刚才正文发生的事。' : '';
+  var tail = soloLock
+    ? '严格只输出被点名的人的回复，绝不出现其他角色。每条一行 名字|类型|内容，不要写别的。'
+    : '最好有 0-1 条来自全新的体制陌生人（按素材库现抽，换着花样来），其余可以是已认识且不在等待名单里的人。每条一行 名字|类型|内容，不要写别的。';
+  var instr = '现在生成 ' + (n || '1-3') + ' 条新私信' + (reason ? '（情境：' + reason + '）' : '') + '。' + stageHint + waitHint + mutedHint + refreshHint + tail;
+  if (strict) instr = '【再次强调：只能输出 名字|类型|内容 的行，每条一行，不许有任何其他文字】\n' + instr;
+  return { ordered: ordered, instr: instr, soloLock: soloLock };
+}
 
-  // ---------- 数据 ----------
-  function convName(sd, id) {
-    const c = (sd.contacts || {})[id];
-    if (c) return val(c.name) || id;
-    if (id === 'chen_guobang') return '陈国邦';
-    const fam = (sd.families || {})[id];
-    if (fam) return val(fam.name) + '家';
-    return id;
-  }
-  function findConvIdByName(sd, name) {
-    const convs = sd.phone?.wechat_conversations || {};
-    for (const id of Object.keys(convs)) {
-      if (convName(sd, id) === name || id === name) return id;
+// ── 解析：每行 名字|类型|内容 ──
+var PT_VALID_TYPES = ['text', 'voice', 'image', 'transfer', 'recall', 'tag'];
+function ptParseDMs(raw) {
+  var rows = [];
+  var text = String(raw || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/^```[a-z]*\s*$/gim, '');
+  var lines = text.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].trim();
+    if (!t) continue;
+    if (t.charAt(0) === '<') break;                       // 噪声标签行 → 停止
+    var parts = t.split('|');
+    var name = (parts[0] || '').trim().replace(/^[-*•\d.\s]+/, '');
+    var type = parts.length >= 3 ? parts[1].trim().toLowerCase() : '';
+    var isRow = !!name && parts.length >= 3 && PT_VALID_TYPES.indexOf(type) !== -1;
+    if (isRow) {
+      rows.push({ name: name, type: type, content: parts.slice(2).join('|').trim() });
+    } else if (rows.length && (rows[rows.length - 1].type === 'text' || rows[rows.length - 1].type === 'voice')) {
+      var last = rows[rows.length - 1];
+      if ((last.content.length + t.length) < 3000) last.content += '\n' + t;   // 长消息被换行拆开 → 拼回
     }
-    // 联系人档案里有但还没有会话 → 新建会话（信来先于往来是常态）
-    for (const [cid, c] of Object.entries(sd.contacts || {})) {
-      if (val(c.name) === name) return cid;
-    }
-    return null;
   }
-  function contactBrief(sd, convId) {
-    const c = (sd.contacts || {})[convId];
-    if (c) {
-      return '姓名：' + val(c.name) + '\n对我的态度：' + val(c.attitude) + '\n当前想要：' + val(c.wants) +
-        '\n能提供：' + val(c.can_provide) + '\n他欠我的：' + JSON.stringify((c.favors_owed || []).map(val)) +
-        '\n我欠他的：' + JSON.stringify((c.favors_debt || []).map(val)) + '\n状态：' + val(c.status);
-    }
-    const fam = (sd.families || {})[convId];
-    if (fam) {
-      const head = fam.head || {};
-      const asym = fam.info_asymmetry || {};
-      return '家庭：' + val(fam.name) + '家\n一家之主：' + val(head.name) + '（关系 ' + val(head.relationship) + '）' +
-        '\n进行中请求：' + JSON.stringify(fam.request ? { type: val(fam.request.type), status: val(fam.request.status) } : null) +
-        '\n信息差（他们不知道你知道的）：' + JSON.stringify((asym.player_knows || []).map(val));
-    }
-    return '（无档案）';
+  return rows;
+}
+
+// ── 名字 → 会话 id（固定联系人/账本联系人按名折回；陌生人名即 id） ──
+function ptNameToId(sb, name) {
+  var sd = ptStatData() || {};
+  var lower = String(name || '').trim().toLowerCase();
+  for (var id in (sd.contacts || {})) {
+    var n = String(ptBare((sd.contacts[id] || {}).name) || '').trim().toLowerCase();
+    if (n && (n === lower || n.indexOf(lower) !== -1 || lower.indexOf(n) !== -1)) return id;
   }
-  function eventSummary(sd) {
-    const evs = Object.entries(sd.events || {}).map(([id, e]) => ({
-      id, type: val(e.type), source: val(e.source), status: val(e.status), family_ref: val(e.family_ref),
-    }));
-    return evs.length ? JSON.stringify(evs) : '（无进行中事件）';
+  for (var fid in (sd.families || {})) {
+    var f = sd.families[fid];
+    var hn = String((f.head && ptBare(f.head.name)) || '').trim().toLowerCase();
+    if (hn && hn === lower) return fid;
   }
-  function asymSummary(sd, convId) {
-    for (const [fid, fam] of Object.entries(sd.families || {})) {
-      const asym = fam.info_asymmetry || {};
-      const members = [fam.head && val(fam.head.name), fam.spouse && val(fam.spouse.name)]
-        .concat(Object.values(fam.children || {}).map((k) => val(k.name)))
-        .filter(Boolean);
-      if (convId === fid || members.some((n) => n && convName(sd, convId).includes(n))) {
-        return '家庭 ' + val(fam.name) + ' 的信息差格子：\n' +
-          '父亲知道：' + JSON.stringify((asym.head_knows || []).map(val)) + '\n' +
-          '母亲知道：' + JSON.stringify((asym.spouse_knows || []).map(val)) + '\n' +
-          '子女知道：' + JSON.stringify((asym.child_knows || []).map(val)) + '\n' +
-          '你（掮客）知道但他们不知道的：' + JSON.stringify((asym.player_knows || []).map(val));
+  // pt 里已有的按名折回
+  var npcs = (sb && sb.npcs) || {};
+  for (var k in npcs) { if (String(npcs[k].name || '').toLowerCase() === lower) return k; }
+  // 固定声音卡里的名字
+  for (var vk in PT_VOICES) { if (vk === name) return vk; }
+  return String(name || '').trim();
+}
+function ptIdToName(sb, id, sd) {
+  sd = sd || ptStatData() || {};
+  if (sd.contacts && sd.contacts[id]) return String(ptBare(sd.contacts[id].name) || id);
+  if (sd.families && sd.families[id]) { var h = sd.families[id].head; return String((h && ptBare(h.name)) || id); }
+  if (PT_VOICES[id]) return id;
+  var npcs = (sb && sb.npcs) || {};
+  return (npcs[id] && npcs[id].name) || id;
+}
+
+// ── 生成一轮 ──
+var _lastRaw = '';
+async function ptGenerateOnce(sb, plot, n, reason, strict) {
+  var built = await ptBuildPrompt(sb, plot, n, reason, strict);
+  var cfg = ptApiCfg();
+  if (!cfg) { throw new Error('NO_API'); }
+  await ptWaitSlot();
+  var raw = await ptCallApi(cfg, built.ordered, built.instr);
+  _lastRaw = typeof raw === 'string' ? raw : (raw && raw.content) || '';
+  var parsed = ptParseDMs(_lastRaw);
+  // soloLock 下滤掉被点名者之外的人
+  if (built.soloLock && reason) {
+    parsed = parsed.filter(function (r) { return reason.indexOf(r.name) !== -1; });
+  }
+  return parsed;
+}
+
+// ── 主流程（请求排队 + 合并，绝不丢单） ──
+var _busy = false, _pending = [];
+function ptMergeRequests(batch) {
+  var reasons = [], focus = [];
+  for (var i = 0; i < batch.length; i++) {
+    var p = batch[i] || {};
+    if (p.reason) reasons.push(p.reason);
+    if (Array.isArray(p.focus)) for (var f = 0; f < p.focus.length; f++) if (focus.indexOf(p.focus[f]) === -1) focus.push(p.focus[f]);
+  }
+  var n = (batch.length === 1 && batch[0] && batch[0].n) ? batch[0].n : (batch.length > 1 ? String(batch.length) + '-3' : '1-3');
+  return { reason: reasons.join('；同时：'), n: n, focus: focus };
+}
+
+async function ptRunOnce(req) {
+  var vars = ptRead();
+  var sb = (vars && vars.pt) ? vars.pt : null;
+  if (!sb) { ptNotify('warning', '手机还没初始化，稍后再试'); return; }
+  var plot = await ptRecentPlot();
+  var all = [];
+  try { all = await ptGenerateOnce(sb, plot, req.n, req.reason, false); }
+  catch (e) {
+    if (String(e && e.message) === 'NO_API') { ptNotify('warning', '未配置独立 API，跳过私信生成'); return; }
+    throw e;
+  }
+  var dms = [], tags = [];
+  for (var i = 0; i < all.length; i++) {
+    if (all[i].type === 'tag') tags.push({ name: all[i].name, label: String(all[i].content).slice(0, 12) });
+    else dms.push(all[i]);
+  }
+  if (!dms.length) {
+    try { all = await ptGenerateOnce(sb, plot, req.n, req.reason, true); } catch (e2) { all = []; }
+    dms = []; tags = [];
+    for (var j = 0; j < all.length; j++) {
+      if (all[j].type === 'tag') tags.push({ name: all[j].name, label: String(all[j].content).slice(0, 12) });
+      else dms.push(all[j]);
+    }
+  }
+  // 批量发补漏：点名的人里有没回的 → 再补一轮（防一次生成只回前两个）
+  if (Array.isArray(req.focus) && req.focus.length) {
+    var replied = {};
+    for (var ri = 0; ri < dms.length; ri++) replied[ptCanon(dms[ri].name)] = true;
+    var missing = req.focus.filter(function (id) { return !replied[id]; });
+    if (missing.length && missing.length < req.focus.length) {
+      var names = missing.map(function (id) { return ptIdToName(sb, id); });
+      var mReason = '补漏：' + names.join('、') + ' 刚才漏了回复，现在必须每人各回 1-2 条，一个不能少。只让这几个人回应，别人不要出现、不要引入陌生人。';
+      var more = [];
+      try { more = await ptGenerateOnce(sb, plot, String(missing.length) + '-2', mReason, false); } catch (e3) { more = []; }
+      for (var mi = 0; mi < more.length; mi++) {
+        var mid = ptCanon(more[mi].name);
+        if (missing.indexOf(mid) !== -1 && more[mi].type !== 'tag') dms.push(more[mi]);
       }
     }
-    return '（该联系人无家庭信息差格子，只按自身档案与公开剧情行事）';
   }
-  function recentMessages(phone, sd, convId, n) {
-    const box = (phone.wechat_messages || {})[convId];
-    const list = box && Array.isArray(val(box.messages)) ? val(box.messages) : [];
-    return list.slice(-n).map((m) => (val(m.from) === 'player' ? '我：' : val(convName(sd, convId)) + '：') + val(m.text));
+  if (!dms.length) {
+    ptNotify('error', '私信生成失败：两次输出都解析不出格式（原始输出在控制台F12）');
+    console.warn(PT_TAG, '解析失败原始输出（后600字）:', _lastRaw ? _lastRaw.slice(-600) : '(空)');
+    return;
   }
-  function currentFloorSafe() {
-    try { const ctx = window.SillyTavern && window.SillyTavern.getContext && window.SillyTavern.getContext(); return ctx ? ctx.chat.length : 0; } catch (e) { return 0; }
-  }
-
-  // ---------- 生成 ----------
-  const SYSTEM_HEAD =
-    '你是「批条」模拟器里手机私信的生成器。任务：生成 NPC 发给「我」（S 市掮客，玩家）的微信私信。\n' +
-    '文风铁律：冷冰冰的礼貌，客气但暗藏内容；威胁用请托句式；陈述句，不用感叹号；1-3 句，像真的微信消息。\n' +
-    '信息差铁律：每个 NPC 只知道自己的感知；「你知道但他们不知道的」绝不出现在私信里。\n' +
-    '输出格式（必须严格遵守）：每条私信一行，格式为 名字|类型|内容。类型只用 text。不输出任何其他文字、解释或 markdown。\n';
-
-  async function generateDMs(convId, n, reason, playerLines) {
-    // 玩家从发件箱发出的消息先入账（v0.2.6：先于 API 检查——未配置 API 也不丢玩家消息，W3 双保险）
-    if (Array.isArray(playerLines) && playerLines.length) {
-      const floor0 = currentFloorSafe();
-      await mutatePhone((p) => {
-        const entry0 = p.wechat_messages[convId] = p.wechat_messages[convId] || { messages: [] };
-        const list0 = Array.isArray(val(entry0.messages)) ? val(entry0.messages) : (entry0.messages = []);
-        for (const line of playerLines) list0.push({ from: 'player', text: String(line), floor: floor0 });
-        while (list0.length > MAX_MSGS) list0.shift();
-        const conv0 = p.wechat_conversations[convId] = p.wechat_conversations[convId] || { unread: 0, last_summary: '', suggested_replies: [] };
-        conv0.last_summary = '我：' + String(playerLines[playerLines.length - 1]).slice(0, 40);
-        conv0.dm_pending = true;
-      });
+  // 写回（串行闸内整树改）
+  await ptUpdate(function (v) {
+    if (!v.pt) v.pt = { npcs: {}, _outbox: {} };
+    for (var di = 0; di < dms.length; di++) {
+      var row = dms[di];
+      var id = ptCanon(row.name);
+      var nm = id;
+      if (row.type === 'tag') continue;
+      var exN = v.pt.npcs && v.pt.npcs[id];
+      if (exN && exN.muted) continue;                      // 冷处理硬闸
+      ptPushThem(v, id, nm, row.type, row.content);
     }
-    const cfg = getApiCfg();
-    if (!cfg) { console.info(TAG, '未配置独立 API，玩家消息已入账、跳过回信生成（手机面板-设置里填写后生效）'); return; }
-    const fresh = await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' });
-    const sd = fresh.stat_data;
-    if (!sd || !sd.phone) return;
-    const name = convName(sd, convId);
-    const phoneNow = await readPhoneTruth();
+    for (var ti = 0; ti < tags.length; ti++) {
+      var tid = ptCanon(tags[ti].name);
+      var tn = v.pt.npcs && v.pt.npcs[tid];
+      if (tn && !tn.archetype) tn.archetype = tags[ti].label;
+    }
+    return v;
+  });
+  try { eventEmit('pt_updated'); } catch (e) {}
+  try { ptNotify('success', '📱 新私信 +' + dms.length); } catch (e) {}
+  ptSyncInject();
+}
 
-    const messages = [
-      { role: 'system', content: SYSTEM_HEAD + '\n【联系人档案】\n' + contactBrief(sd, convId) + '\n【信息差】\n' + asymSummary(sd, convId) },
-      { role: 'user', content: '【当前事件】\n' + eventSummary(sd) +
-        '\n【最近消息】\n' + (recentMessages(phoneNow, sd, convId, 6).join('\n') || '（无）') +
-        '\n\n请生成 ' + n + ' 条 ' + name + ' 发来的新私信' + (reason ? '（情境：' + reason + '）' : '') + '。每条一行：名字|text|内容' },
-    ];
+// ── 主线感知：把手机私信摘要隐形注入主线 LLM 上下文（injectPrompts） ──
+// 参考卡同款机制：私信不进 stat_data、不进正文，主线靠这份摘要"知道"手机上发生过什么。
+function ptBuildDigest(v) {
+  var npcs = (v.pt && v.pt.npcs) || {};
+  var budget = parseInt(ptLsGet('piaotiao_dm_mem'), 10); if (!(budget > 0)) budget = 120;
+  var keys = Object.keys(npcs)
+    .filter(function (k) { return (npcs[k].dm_history || []).length > 0; })
+    .sort(function (a, b) { return (npcs[b].last_ts || 0) - (npcs[a].last_ts || 0); });
+  var blocks = [], used = 0;
+  for (var ki = 0; ki < keys.length && used < budget; ki++) {
+    var npc = npcs[keys[ki]];
+    var h = npc.dm_history || [];
+    var take = Math.min(ki < 3 ? Math.max(12, Math.ceil(budget / 3)) : 6, budget - used, h.length);
+    if (take <= 0) break;
+    var recent = h.slice(-take);
+    used += recent.length;
+    var lines = ['· 与 ' + npc.name + ' 的微信往来（最近' + recent.length + '条）— 仅 ' + npc.name + ' 与 User 知晓，其他角色不知情：'];
+    for (var i = 0; i < recent.length; i++) {
+      var m = recent[i];
+      var who = m.sender === 'ME' ? 'User' : npc.name;
+      if (m.type === 'recall' && m.sender === 'ME') { lines.push('   User: （发了一条消息又撤回了——' + npc.name + ' 看不到内容）'); continue; }
+      var tag = (m.type && m.type !== 'text') ? '[' + m.type + ']' : '';
+      lines.push('   ' + who + tag + ': ' + String(m.content || '').substring(0, 300));
+    }
+    blocks.push(lines.join('\n'));
+  }
+  if (!blocks.length) return '';
+  return '【User 手机微信摘要（带入正文人物的记忆；每个角色只记得自己参与的那段，别人的私聊内容TA不知道）】\n' + blocks.join('\n');
+}
+function ptSyncInject() {
+  try {
+    var v = ptRead();
+    var digest = ptBuildDigest(v);
+    try { uninjectPrompts(['piaotiao-dm-digest']); } catch (e) {}
+    if (!digest) return;
+    injectPrompts([{
+      id: 'piaotiao-dm-digest', position: 'in_chat', depth: 1,
+      role: 'system', content: digest, should_scan: true,
+    }]);
+  } catch (e) { console.warn(PT_TAG, '注入摘要失败', e); }
+}
 
-    let raw = await callIndependent(cfg, messages);
-    const rows = parseDMs(raw).filter((r) => r.name === name || name.includes(r.name) || r.name.includes(name));
+// ── 触发 ──
+// 玩家发送（面板「确定发送」）→ { focus: [ids], linesByConv, reason }
+// 正文楼结算 → pt_floor_log（账房 VUE 末尾发）→ 有待复信先补、再按概率推进/陌生人
+function ptOnPlayerReply(payload) {
+  enqueueRequest({
+    reason: payload && payload.reason ? payload.reason : '玩家刚在微信里回复了你',
+    n: (payload && payload.n) || '1-2',
+    focus: payload && payload.focus,
+    linesByConv: payload && payload.linesByConv,
+  });
+}
+var AUTO_STRANGER_CHANCE = 0.25, AUTO_STRANGER_MINGAP = 3, AUTO_STRANGER_MAXPENDING = 4;
+async function ptOnFloorLog() {
+  if (_busy || _pending.length) return;
+  var vars = ptRead();
+  var sb = (vars && vars.pt) ? vars.pt : null;
+  if (!sb || !sb.npcs) return;
+  var cfg = ptApiCfg();
+  if (!cfg) return;                                        // 未配置独立 API：正文楼什么都不做
+  var npcs = sb.npcs || {};
+  // 1) 有待复信（NPC 上一条还没被回）→ 让剧情推着有人说话
+  var pendingIds = [];
+  for (var k in npcs) {
+    if (!npcs.hasOwnProperty(k)) continue;
+    var h = npcs[k].dm_history || [];
+    if (h.length && h[h.length - 1].sender === 'THEM') pendingIds.push(k);
+  }
+  if (pendingIds.length && pendingIds.length <= 3) {
+    var names = pendingIds.map(function (id) { return (sb.npcs[id] && sb.npcs[id].name) || id; });
+    enqueueRequest({ reason: '剧情推进后，这几个人里该有人顺着正文的事发来新消息：' + names.join('、') + '。没有新鲜事的人保持沉默', n: '0-2', focus: [] });
+    return;
+  }
+  // 2) 偶尔一个体制陌生人主动来探路
+  var auto = sb._auto || { turns: 0, last: -99 };
+  var turns = (auto.turns || 0) + 1;
+  var unreadTotal = 0;
+  for (var k2 in npcs) { if (npcs.hasOwnProperty(k2)) unreadTotal += (npcs[k2].unread || 0); }
+  var hit = (turns - (auto.last != null ? auto.last : -99)) >= AUTO_STRANGER_MINGAP
+    && unreadTotal < AUTO_STRANGER_MAXPENDING
+    && Math.random() < AUTO_STRANGER_CHANCE;
+  await ptUpdate(function (v) {
+    if (!v.pt) return v;
+    if (!v.pt._auto) v.pt._auto = { turns: 0, last: -99 };
+    v.pt._auto.turns = turns;
+    if (hit) v.pt._auto.last = turns;
+    return v;
+  });
+  if (hit) enqueueRequest({ reason: '全新的体制内陌生人主动来探路（按素材库现抽）：也许是打探，也许是求办事，也许是送消息投诚', n: '1' });
+}
 
-    // 写回：重读聊天级真源再写（竞态保护；v0.2.6 起不再直写楼层变量）
-    const floor = currentFloorSafe();
-    await mutatePhone((p) => {
-      const entry = p.wechat_messages[convId] = p.wechat_messages[convId] || { messages: [] };
-      const list = Array.isArray(val(entry.messages)) ? val(entry.messages) : (entry.messages = []);
-      for (const r of rows) {
-        list.push({ from: 'npc', text: r.raw, type: r.type, floor });
+// 请求队列（批量合并）
+var _reqQueue = [];
+function enqueueRequest(req) { _reqQueue.push(req); pumpRequests(); }
+var _pumping = false;
+async function pumpRequests() {
+  if (_pumping) return;
+  _pumping = true;
+  try {
+    while (_reqQueue.length) {
+      var batch = _reqQueue.splice(0, _reqQueue.length);
+      var merged = ptMergeRequests(batch);
+      // 玩家先发的消息先入账（发件箱的 lines）
+      if (batch.length === 1 && batch[0].linesByConv) {
+        var lb = batch[0].linesByConv;
+        await ptUpdate(function (v) {
+          if (!v.pt) v.pt = { npcs: {}, _outbox: {} };
+          for (var id in lb) {
+            if (!lb.hasOwnProperty(id)) continue;
+            var nm = ptIdToName(v, id);
+            for (var li = 0; li < lb[id].length; li++) ptPushMe(v, id, nm, lb[id][li]);
+          }
+          return v;
+        });
       }
-      while (list.length > MAX_MSGS) list.shift();
-      const conv = p.wechat_conversations[convId] = p.wechat_conversations[convId] || { unread: 0, last_summary: '', suggested_replies: [] };
-      const lastRow = rows[rows.length - 1];
-      conv.last_summary = name + '：' + (lastRow ? lastRow.raw.slice(0, 40) : '');
-      conv.unread = (Number(val(conv.unread)) || 0) + rows.length; // 聊天级为裸值，无成对格式
-      conv.dm_pending = false;
-    });
-    try { window.dispatchEvent(new Event('piaotiao_phone_refresh')); } catch (e) { /* 面板未挂载时忽略 */ }
-    console.info(TAG, '私信已产出 ×' + rows.length + '：', convId);
-  }
-
-  // ---------- 触发（机制照参考卡：事件排队串行处理，批量发送不丢事件） ----------
-  const queue = [];
-  let busy = false;
-  function enqueue(task) {
-    queue.push(task);
-    pump();
-  }
-  async function pump() {
-    if (busy) return;
-    busy = true;
-    try {
-      while (queue.length) {
-        const task = queue.shift();
-        try { await task(); } catch (e) { console.warn(TAG, '本楼私信生成静默跳过：', e && (e.message || e)); }
+      try { await ptRunOnce(merged); } catch (e) {
+        console.warn(PT_TAG, '本轮私信生成静默跳过：', e && (e.message || e));
       }
-    } finally { busy = false; }
-  }
+      try { eventEmit('pt_updated'); } catch (e) {}
+    }
+  } finally { _pumping = false; }
+}
 
-  function onPlayerReply(payload) {
-    const convId = payload && payload.convId;
-    if (!convId) return;
-    enqueue(() => generateDMs(convId, 1, payload && payload.reason ? payload.reason : '玩家刚在微信里回复了你', payload && payload.lines));
-  }
-
-  function onFloorEnded() {
-    enqueue(async () => {
-      const cfg = getApiCfg();
-      if (!cfg) return; // 未配置独立 API：什么都不做
-      const sd = (await window.Mvu.getMvuData({ type: 'message', message_id: 'latest' })).stat_data;
-      if (!sd || !sd.phone) return;
-      // 新事件消息：有进行中事件时，从事件相关或可用联系人里挑一个主动来信（待答会话读聊天级真源）
-      const evs = Object.values(sd.events || {});
-      const convs = (await readPhoneTruth()).wechat_conversations;
-      const pending = Object.keys(convs).find((id) => val(convs[id].dm_pending) === true);
-      let target = pending;
-      let reason = '玩家有待回复的私信';
-      if (!target) {
-        const cand = new Set();
-        for (const ev of evs) {
-          if (val(ev.family_ref) && sd.families?.[val(ev.family_ref)]) cand.add(val(ev.family_ref));
-          if (val(ev.contact_ref)) cand.add(val(ev.contact_ref));
+// ── 启动种子 + 旧数据迁移（幂等；每个聊天都要跑到——种子跟着聊天级变量走，换聊天/新聊天都要补） ──
+var _seeding = false;
+async function ensureSeed() {
+  if (_seeding) return;
+  _seeding = true;
+  try {
+    var cur = ptRead();
+    if (cur.pt && cur.pt._seeded) {
+      _seeding = false;
+      var before = Object.keys((cur.pt && cur.pt.npcs) || {}).sort().join('|');
+      var probe = JSON.parse(JSON.stringify(cur));
+      ptMergeFrags(probe);
+      var after = Object.keys(probe.pt.npcs).sort().join('|');
+      if (before !== after) await ptUpdate(function (v) { ptMergeFrags(v); return v; });
+      return;
+    }   // 本聊天已种过（碎片有变化才写回）
+    await ptUpdate(function (v) {
+      if (!v.pt) v.pt = { npcs: {}, _outbox: {} };
+      if (v.pt._seeded) return v;
+      // 旧版迁移：v0.2.6 的 piaotiao_phone（messages 数组）→ pt.npcs
+      if (v.piaotiao_phone && !v.pt._migrated) {
+        var old = v.piaotiao_phone;
+        for (var id in (old.wechat_messages || {})) {
+          var list = old.wechat_messages[id] && old.wechat_messages[id].messages;
+          if (!Array.isArray(list) || !list.length) continue;
+          var npc = ptEnsureNpc(v, ptCanon(String(id)), ptCanon(String(id)));
+          for (var i = 0; i < list.length; i++) {
+            var m = list[i];
+            npc.dm_history.push({ sender: ptBare(m.from) === 'player' ? 'ME' : 'THEM', time: '', ts: 0, type: 'text', content: String(ptBare(m.text) || '') });
+          }
+          if (npc.dm_history.length > 400) npc.dm_history = npc.dm_history.slice(-400);
         }
-        for (const [cid, c] of Object.entries(sd.contacts || {})) {
-          if (val(c.status) === 'available' || val(c.status) === 'active') cand.add(cid);
-        }
-        const pool = [...cand].filter((id) => convs[id]);
-        if (!pool.length) return;
-        target = pool[Math.floor(Math.random() * pool.length)];
-        reason = evs.length ? '当前事件推进带来的新动向' : '日常往来问候';
+        v.pt._migrated = true;
+        console.info(PT_TAG, '旧版私信数据已迁移');
       }
-      await generateDMs(target, 1, reason);
+      // 合并历史碎片后，开局种子：陈国邦的第一条私信
+      ptMergeFrags(v);
+      v.pt._seeded = true;
+      var npc0 = ptEnsureNpc(v, '陈国邦', '陈国邦');
+      if (!npc0.dm_history.length) {
+        npc0.dm_history.push({ sender: 'THEM', time: ptNow(), ts: Date.now(), type: 'text', content: '王厅长那边提到您了。材料我让小陈再整理一份全的，您过目之后，咱们约个只有你我两个人的时间地点细谈。' });
+        npc0.unread = 1;
+        npc0.last_ts = Date.now();
+        npc0.last_message = '王厅长那边提到您了。材料我让小陈再整…';
+      }
+      return v;
     });
-  }
+    ptSyncInject();
+  } catch (e) { console.warn(PT_TAG, '种子失败', e); }
+  _seeding = false;
+}
 
-  function mount() {
-    if (window.Mvu && window.Mvu.events && typeof eventOn === 'function') {
-      eventOn(window.Mvu.events.VARIABLE_UPDATE_ENDED, onFloorEnded);
-      window.addEventListener('piaotiao_request_dm', (e) => { onPlayerReply(e.detail || {}); });
-      console.info(TAG, '已挂载：私信生成通道（独立API直连 + 行格式解析，phone 子树单写者）');
-    } else {
-      let waited = 0;
-      const timer = setInterval(() => {
-        waited += 400;
-        if ((window.Mvu && window.Mvu.events && typeof eventOn === 'function') || waited > 30000) {
-          clearInterval(timer);
-          if (waited <= 30000) mount();
-          else console.warn(TAG, 'Mvu 长时间未就绪，私信通道未启动');
-        }
-      }, 400);
-    }
+// ── 挂载 ──
+function ptMount() {
+  if (typeof eventOn !== 'function') {
+    var waited = 0;
+    var timer = setInterval(function () {
+      waited += 400;
+      if (typeof eventOn === 'function' || waited > 30000) { clearInterval(timer); if (waited <= 30000) ptMount(); else console.warn(PT_TAG, '事件系统长时间未就绪，私信通道未启动'); }
+    }, 400);
+    return;
   }
-  mount();
-  window.__PiaotiaoDmGenerator = true;
+  eventOn('pt_request_dm', function (payload) { ptOnPlayerReply(payload || {}); }); // TH 事件监听器直接收 payload 本体（非 e.detail）
+  eventOn('pt_floor_log', function () { ensureSeed(); ptOnFloorLog(); });
+  ensureSeed();
+  setInterval(function () { try { ensureSeed(); } catch (e) {} }, 10000);   // 换聊天/新聊天后补种（幂等，聊天级 _seeded 挡重复）
+  console.info(PT_TAG, '已挂载：私信生成通道（独立API直连 + 行格式解析 + 队列合并/补漏 + injectPrompts 主线感知）');
+}
+ptMount();
+window.__PiaotiaoDmGenerator = true;
+
 })();
