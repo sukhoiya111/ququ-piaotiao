@@ -283,9 +283,10 @@
   function openPanel() {
     ensureHost();
     panelHost.style.display = 'block';
+    if (root) root.style.display = 'none'; // v0.3.4：面板打开时隐藏 FAB（窄屏两者重叠压字）
     render();
   }
-  function closePanel() { if (panelHost) panelHost.style.display = 'none'; }
+  function closePanel() { if (panelHost) panelHost.style.display = 'none'; if (root) root.style.display = ''; }
   function panelVisible() { return panelHost && panelHost.style.display !== 'none'; }
 
   // ── 渲染 ──
