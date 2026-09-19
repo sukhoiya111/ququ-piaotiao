@@ -292,7 +292,7 @@
   function render() {
     if (!panelEl) return;
     try {
-      var tabs = [['wechat', '微信'], ['contacts', '联系人'], ['network', '关系网'], ['notes', '备忘录'], ['settings', '设置']];
+      var tabs = [['wechat', '微信'], ['contacts', '联系人'], ['network', '关系网'], ['notes', '备忘录'], ['gallery', '图鉴'], ['settings', '设置']];
       var head =
         '<div id="piaotiao-drag-handle" style="background:' + C.header + ';padding:10px 14px;font-size:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;touch-action:none;">' +
         '<span>批条 · 这事，能办。</span><span id="piaotiao-close" style="cursor:pointer;color:' + C.dim + ';font-size:13px;">收起</span></div>' +
@@ -306,6 +306,7 @@
       else if (currentView === 'contacts') body = viewContacts();
       else if (currentView === 'network') body = viewNetwork();
       else if (currentView === 'notes') body = viewNotes();
+      else if (currentView === 'gallery') body = viewGallery();
       else if (currentView === 'settings') body = viewSettings();
       panelEl.innerHTML = head + '<div id="piaotiao-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;">' + body + '</div>';
       bindPanel();
@@ -604,6 +605,41 @@
       row('人情余额', (num(d.favors_balance)) + '（我欠 ' + (num(d.favors_debt_total)) + '）') +
       row('关系网等级', num(d.network_level), 'var(--green)') +
       '</div><div style="padding:10px 14px;color:var(--dim);font-size:12px;">人情账目</div>' + (favors || '<div style="padding:10px 14px;color:var(--dim);font-size:12px;">暂无往来</div>');
+  }
+
+  // ── 图鉴（P5：跨聊天结局收藏；解锁记录在脚本级持久存储，MVU 只带本局结果） ──
+  // ENDING_META 的 name/gallery 两列与卡内 ending-copy.js 人工保持一致
+  var ENDING_META = {
+    A: ['教父', '你成了规矩本身'], B: ['牺牲品', '权力只保护自己'], C: ['白手套', '干净是买来的'],
+    D: ['被吞噬者', '别人流程里的一个章'], E: ['共生体', '谁也不敢先动'], F: ['末路', 'S市不缺下一个中间人'],
+  };
+  function galleryRead() {
+    try { var v = getVariables({ type: 'script' }) || {}; return v.piaotiao_gallery || {}; } catch (e) { return {}; }
+  }
+  function fmtDay(ts) {
+    var d = new Date(ts);
+    function p2(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '/' + p2(d.getMonth() + 1) + '/' + p2(d.getDate());
+  }
+  function viewGallery() {
+    var g = galleryRead();
+    var sd = ptStatData() || {};
+    var cur = sd.endings ? ptBare(sd.endings.current_ending) : null;
+    var rows = '';
+    ['A', 'B', 'C', 'D', 'E', 'F'].forEach(function (x) {
+      var m = ENDING_META[x] || [x, ''];
+      var rec = g[x];
+      var isCur = cur === x;
+      var right = rec
+        ? '<span style="color:var(--green);font-size:11px;flex-shrink:0;">✓ ' + fmtDay(rec.ts) + '</span>'
+        : '<span style="color:var(--dim);font-size:11px;flex-shrink:0;">未解锁</span>';
+      rows += '<div class="pt-row" style="cursor:default;' + (isCur ? 'border-left:3px solid var(--gold);' : '') + '">' +
+        '<span class="pt-ava" style="' + (rec ? '' : 'filter:grayscale(1);opacity:.5;') + '">' + (rec ? x : '?') + '</span>' +
+        '<span class="pt-mid"><span class="pt-name"><span>' + (rec ? esc(m[0]) : '<span style="color:var(--dim);">？？？</span>') +
+        (isCur ? ' <span style="font-size:10px;color:var(--gold);">本局</span>' : '') + '</span>' + right + '</span>' +
+        '<span class="pt-prev">' + (rec ? esc(m[1]) : '这条路线还没有人走到头') + '</span></span></div>';
+    });
+    return '<div style="padding:10px 14px;font-size:12px;color:var(--dim);">跨聊天图鉴 · 解锁一次永久点亮（存本机酒馆助手，不进聊天文件）</div>' + rows;
   }
 
   // ── 设置 ──
