@@ -543,9 +543,24 @@
       var f = fams[fid];
       var head = f.head || {};
       var hid = (head && ptBare(head.name)) || fid;
-      frows += '<div class="pt-row" data-contact="' + esc(hid) + '"><span class="pt-ava family">' + esc(String(hid).slice(0, 1)) + '</span>' +
-        '<span class="pt-mid"><span class="pt-name">' + esc(hid) + '<span style="font-size:11px;color:var(--dim);">' + esc(ptBare(f.name) || '') + '家·关系' + (ptBare(head.relationship) || 0) + '</span></span>' +
-        '<span class="pt-meta">请求：' + esc(f.request ? ptBare(f.request.type) + '/' + ptBare(f.request.status) : '无') + '｜暴露：' + (ptBare(f.exposure_risk) || 0) + '</span></span></div>';
+      // v0.3.5：成员行化——家主/配偶/子女各自成行（正文出场即自动入列的载体）
+      function famRow(name, role, rel, extra) {
+        var nm = String(name || '').trim();
+        if (!nm) return '';
+        var roleTag = role === '一家之主' ? '' : '<span style="font-size:10px;color:var(--gold);margin-left:6px;">' + role + '</span>';
+        return '<div class="pt-row" data-contact="' + esc(nm) + '"><span class="pt-ava family">' + esc(nm.slice(0, 1)) + '</span>' +
+          '<span class="pt-mid"><span class="pt-name">' + esc(nm) + roleTag + '<span style="font-size:11px;color:var(--dim);">' + esc(ptBare(f.name) || '') + '家' + (rel !== null && rel !== undefined ? '·关系' + rel : '') + '</span></span>' +
+          '<span class="pt-meta">' + (extra || '') + '</span></span></div>';
+      }
+      frows += famRow(hid, '一家之主', ptBare(head.relationship) || 0, '请求：' + esc(f.request ? ptBare(f.request.type) + '/' + ptBare(f.request.status) : '无') + '｜暴露：' + (ptBare(f.exposure_risk) || 0));
+      var sp = f.spouse || {};
+      if (ptBare(sp.name)) frows += famRow(ptBare(sp.name), '配偶', ptBare(sp.relationship) || 0, '察觉：' + (ptBare(sp.awareness) || 0) + '｜同谋：' + (ptBare(sp.complicity) || 0));
+      var ch = f.children || {};
+      for (var cid in ch) {
+        var c = ch[cid];
+        if (!ptBare(c.name)) continue;
+        frows += famRow(ptBare(c.name), '子女', ptBare(c.relationship) || 0, '察觉：' + (ptBare(c.awareness) || 0) + '｜立场：' + esc(ptBare(c.stance) || '—'));
+      }
     }
     return '<div style="padding:10px 14px;font-size:12px;color:var(--dim);">点联系人可直达会话（档案由账本驱动）</div>' +
       (frows ? '<div style="padding:4px 14px;font-size:11px;color:var(--gold);">在办家庭</div>' + frows : '') +

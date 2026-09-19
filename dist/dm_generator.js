@@ -596,13 +596,85 @@ function ptOnPlayerReply(payload) {
   });
 }
 var AUTO_STRANGER_CHANCE = 0.25, AUTO_STRANGER_MINGAP = 3, AUTO_STRANGER_MAXPENDING = 4;
+// ── v0.3.5：剧情成员同步（正文出场人物自动入列 + 察觉变化触发剧情私信） ──
+var STORY_DM_CHANCE = 0.35, STORY_DM_COOLDOWN = 8;
+function ptFloorNo() { try { return (parent.SillyTavern && parent.SillyTavern.getContext().chat.length) || 0; } catch (e) { return 0; } }
+function ptStoryCast(sd) {
+  var cast = {};
+  function put(name, info) {
+    var n = String(name || '').trim();
+    if (!n || n === '无' || n.length > 12) return;
+    var key = ptCanon(n);
+    if (!cast[key]) { info.name = n; cast[key] = info; }
+  }
+  for (var fid in (sd.families || {})) {
+    var f = sd.families[fid];
+    if (f.head && ptBare(f.head.name)) put(ptBare(f.head.name), { family: fid, role: '一家之主', aware: Number(ptBare(f.head.awareness)) || 0 });
+    if (f.spouse && ptBare(f.spouse.name)) put(ptBare(f.spouse.name), { family: fid, role: '配偶', aware: Number(ptBare(f.spouse.awareness)) || 0 });
+    var ch = f.children || {};
+    for (var cid in ch) { var c = ch[cid]; if (ptBare(c.name)) put(ptBare(c.name), { family: fid, role: '子女', aware: Number(ptBare(c.awareness)) || 0, stance: ptBare(c.stance) || '疏离' }); }
+  }
+  for (var cid2 in (sd.contacts || {})) {
+    var c2 = sd.contacts[cid2];
+    if (ptBare(c2.name)) put(ptBare(c2.name), { contact: cid2, role: ptBare(c2.group) || '联系人', aware: -1 });
+  }
+  return cast;
+}
+function ptStoryScan(allowDm) {
+  try {
+    var sd = ptStatData() || {};
+    var cast = ptStoryCast(sd);
+    var toAsk = [];
+    ptUpdate(function (v) {
+      if (!v.pt || !v.pt.npcs) return v;
+      for (var key in cast) {
+        var info = cast[key];
+        if (!v.pt.npcs[key]) {
+          var npc = ptEnsureNpc(v, key, info.name);
+          npc.source = 'story';
+          npc.story_role = info.role;
+          if (info.family) npc.story_family = info.family;
+          // 世界书档案映射动态注册（人物档案·人名 / 联系人档案·人名；查不到则 dossier 为空，无害）
+          if (!PT_WB_KEY[info.name]) PT_WB_KEY[info.name] = (info.contact ? '联系人档案·' + info.name : '人物档案·' + info.name);
+        }
+      }
+      if (!allowDm) return v;
+      var floorNow = ptFloorNo();
+      for (var key2 in cast) {
+        var info2 = cast[key2];
+        if (!info2.family || info2.role === '一家之主') continue; // 一家之主走正门对话；配偶/子女才是背线核心（设计 §3.2）
+        var npc2 = v.pt.npcs[key2];
+        if (!npc2 || npc2.muted) continue;
+        var aw = Number(info2.aware) || 0;
+        if (aw <= 0) continue;
+        var st = npc2._story || { floor: -99, aware: 0 };
+        var isNew = !npc2._story;
+        var risen = aw > (st.aware || 0) && (floorNow - (st.floor || -99)) >= STORY_DM_COOLDOWN;
+        if (isNew || risen) {
+          npc2._story = { floor: floorNow, aware: aw };
+          if (Math.random() < STORY_DM_CHANCE) toAsk.push(info2);
+        }
+      }
+      return v;
+    }).then(function () {
+      for (var i = 0; i < toAsk.length; i++) {
+        var a = toAsk[i];
+        var stanceHint = a.stance === '反抗' ? '质问、警告或冷处理' : a.stance === '共谋' ? '试探合作、递话' : a.stance === '被利用' ? '隐晦地求助' : '小心翼翼地试探';
+        enqueueRequest({ reason: a.name + '（' + (a.family || '') + '家的' + a.role + '，察觉度 ' + a.aw + '）在剧情里察觉到了家里的异常。以 TA 的立场主动给玩家发私信：' + stanceHint + '。符合 TA 的身份与性格，冷冰冰的礼貌，不要写成求救信，不要提系统或数值。没被点名的人这一轮不出现', n: '1-2', focus: [ptCanon(a.name)] });
+      }
+    });
+  } catch (eS) { console.warn(PT_TAG, '剧情成员扫描失败（不影响其他私信）', eS); }
+}
+
 async function ptOnFloorLog() {
   if (_busy || _pending.length) return;
   var vars = ptRead();
   var sb = (vars && vars.pt) ? vars.pt : null;
   if (!sb || !sb.npcs) return;
+  ptStoryScan(false);                                      // v0.3.5：正文出场人物自动入列（建会话不需要 API）
   var cfg = ptApiCfg();
   if (!cfg) return;                                        // 未配置独立 API：正文楼什么都不做
+  ptStoryScan(true);                                       // v0.3.5：察觉变化 → 剧情私信候选
   var npcs = sb.npcs || {};
   // 1) 有待复信（NPC 上一条还没被回）→ 让剧情推着有人说话
   var pendingIds = [];
