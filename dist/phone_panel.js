@@ -56,35 +56,31 @@
     if (pos) { const c = clampXY(pos.x, pos.y); setClientPos(el, c.x, c.y); return true; }
     return false;
   }
-  function makeDraggable(el, handle, storeKey) {
-    handle.style.touchAction = 'none';
-    handle.style.cursor = 'grab';
-    let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
-    handle.addEventListener('pointerdown', (e) => {
-      dragging = true; moved = false; sx = e.clientX; sy = e.clientY;
-      const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
-      try { handle.setPointerCapture(e.pointerId); } catch (err) {}
-    });
-    handle.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - sx, dy = e.clientY - sy;
-      if (!moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return; // 6px 内算点击不算拖
-      moved = true;
+  // 委托版拖动（事件挂容器，子元素重建不影响）：命中把手/面板头部才开始拖
+  const dragState = { el: null, key: null, sx: 0, sy: 0, ox: 0, oy: 0, moved: false };
+  function dragPointerDown(e, el, key) {
+    dragState.el = el; dragState.key = key; dragState.sx = e.clientX; dragState.sy = e.clientY;
+    const r = el.getBoundingClientRect(); dragState.ox = r.left; dragState.oy = r.top;
+    dragState.moved = false;
+    try { el.setPointerCapture && el.setPointerCapture(e.pointerId); } catch (err) {}
+  }
+  function dragPointerMove(e) {
+    if (!dragState.el) return;
+    const dx = e.clientX - dragState.sx, dy = e.clientY - dragState.sy;
+    if (!dragState.moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return; // 6px 内算点击不算拖
+    dragState.moved = true;
+    recalib();
+    const c = clampXY(dragState.ox + dx, dragState.oy + dy);
+    setClientPos(dragState.el, c.x, c.y);
+    e.preventDefault();
+  }
+  function dragPointerUp() {
+    if (dragState.el && dragState.moved) {
       recalib();
-      const c = clampXY(ox + dx, oy + dy);
-      setClientPos(el, c.x, c.y);
-      e.preventDefault();
-    });
-    handle.addEventListener('pointerup', () => {
-      if (!dragging) return;
-      dragging = false;
-      if (moved) {
-        recalib();
-        const r = el.getBoundingClientRect();
-        savePos(storeKey, r.left, r.top);
-      }
-    });
-    handle.addEventListener('pointercancel', () => { dragging = false; });
+      const r = dragState.el.getBoundingClientRect();
+      savePos(dragState.key, r.left, r.top);
+    }
+    dragState.el = null;
   }
 
   // ---------- 数据读取（只读投影） ----------
@@ -143,6 +139,10 @@
       root.id = 'piaotiao-phone-root';
       root.style.cssText = 'position:fixed;left:70%;top:20%;z-index:9998;font-family:"Microsoft YaHei",system-ui,sans-serif;';
       root.addEventListener('click', onRootClick);
+      root.addEventListener('pointerdown', (e) => { if (t2(e)) { dragPointerDown(e, root, FAB_POS_KEY); } });
+      root.addEventListener('pointermove', dragPointerMove);
+      root.addEventListener('pointerup', dragPointerUp);
+      root.addEventListener('pointercancel', dragPointerUp);
       host.body.appendChild(root);
       if (!applyPos(root, FAB_POS_KEY)) defaultFabPos();
     }
@@ -153,6 +153,10 @@
       panelHostRoot.style.cssText = 'position:fixed;left:30%;top:12%;z-index:9999;display:none;font-family:"Microsoft YaHei",system-ui,sans-serif;';
       panelHostRoot.addEventListener('click', onRootClick);
       panelHostRoot.addEventListener('keydown', onRootKeydown);
+      panelHostRoot.addEventListener('pointerdown', (e) => { if (t2(e)) { dragPointerDown(e, panelHostRoot, PANEL_POS_KEY); } });
+      panelHostRoot.addEventListener('pointermove', dragPointerMove);
+      panelHostRoot.addEventListener('pointerup', dragPointerUp);
+      panelHostRoot.addEventListener('pointercancel', dragPointerUp);
       // Key 框 readonly 到聚焦才解锁：安卓 autofill 只认这招（参考卡实测），focusin 才能冒泡
       panelHostRoot.addEventListener('focusin', (e) => {
         if (e.target && e.target.id === 'piaotiao-cfg-key') e.target.removeAttribute('readonly');
@@ -161,7 +165,6 @@
       if (!applyPos(panelHostRoot, PANEL_POS_KEY)) defaultPanelPos();
     }
     renderLauncher();
-    if (panelEl) makeDraggable(panelHostRoot, panelEl.querySelector('#piaotiao-drag-handle'), PANEL_POS_KEY);
     return host;
   }
 
@@ -193,15 +196,19 @@
       }
       panelHostRoot.style.display = 'block';
       render();
-    } catch (e) { reportError('面板打开失败', e); }
+    } catch (e) {
+      try { reportError('面板打开失败', e); } catch (e2) {}
+      try { panelEl.innerHTML = '<div style="padding:16px;color:#e74c3c;font-size:13px;">面板打开失败：' + esc(String(e && e.message || e)) + '<br><br>请按 F12 打开控制台，把红色报错截图发给开发者。</div>'; } catch (e2) {}
+    }
   }
   function closePanel() { if (panelHostRoot) panelHostRoot.style.display = 'none'; }
 
   async function render() {
     if (!panelEl) return;
     try {
-      const stat = await readStat();
-      if (!stat) { panelEl.innerHTML = '<div style="padding:20px;color:' + COLORS.dim + '">账本尚未初始化</div>'; return; }
+      let stat = null;
+      try { stat = await readStat(); } catch (e) { stat = null; }
+      if (!stat) { panelEl.innerHTML = '<div style="padding:20px;color:' + COLORS.dim + '">账本尚未初始化（发一条正文消息后重试）</div>'; return; }
       const tabs = ['wechat', 'contacts', 'network', 'notes', 'settings'];
       const tabNames = { wechat: '微信', contacts: '联系人', network: '关系网', notes: '备忘录', settings: '设置' };
       let body = '';
@@ -221,9 +228,10 @@
         '<div id="piaotiao-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;">' + body + '</div>';
       panelEl.querySelector('#piaotiao-close').addEventListener('click', (e) => { e.stopPropagation(); closePanel(); });
       panelEl.querySelectorAll('[data-tab]').forEach((el) => el.addEventListener('click', (e) => { e.stopPropagation(); currentView = el.getAttribute('data-tab'); currentConv = null; render(); }));
-      // 面板 innerHTML 重建后拖动把手要重绑
-      makeDraggable(panelHostRoot, panelEl.querySelector('#piaotiao-drag-handle'), PANEL_POS_KEY);
-    } catch (e) { reportError('渲染失败', e); }
+    } catch (e) {
+      try { reportError('渲染失败', e); } catch (e2) {}
+      try { panelEl.innerHTML = '<div style="padding:16px;color:#e74c3c;font-size:13px;">渲染失败：' + esc(String(e && e.message || e)) + '<br><br>请按 F12 打开控制台，把红色报错截图发给开发者。</div>'; } catch (e2) {}
+    }
   }
 
   // ---------- 设置（UI 照抄参考卡，含防密码管理器处理） ----------
