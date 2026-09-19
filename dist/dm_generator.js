@@ -666,6 +666,73 @@ function ptStoryScan(allowDm) {
   } catch (eS) { console.warn(PT_TAG, '剧情成员扫描失败（不影响其他私信）', eS); }
 }
 
+// ── v0.3.6：NPC 主动事件调度（每个世界书 NPC 都可能主动开启事件：私信/登门/偶遇） ──
+var EVT_CHANCE = 0.4, EVT_MINGAP = 3, EVT_NPC_COOLDOWN = 20;
+function ptEventTick() {
+  try {
+    var evtMeta = (ptRead().pt && ptRead().pt._evt) || { turns: 0, last: -99, lastNpc: '', cd: {} };
+    var turns = (evtMeta.turns || 0) + 1;
+    var passGate = (turns - (evtMeta.last != null ? evtMeta.last : -99)) >= EVT_MINGAP;
+    ptUpdate(function (v) {
+      if (!v.pt) return v;
+      v.pt._evt = v.pt._evt || { turns: 0, last: -99, lastNpc: '', cd: {} };
+      v.pt._evt.turns = turns;
+      return v;
+    });
+    if (!passGate) return;
+    (async function () {
+      try {
+        var es = await ptWbEntries();
+        var candidates = [];
+        var seen = {};
+        for (var i = 0; i < es.length; i++) {
+          var nm = String(es[i].comment || es[i].name || '');
+          var m = nm.match(/^(?:人物档案|联系人档案)·(.+)$/);
+          if (m && es[i].enabled !== false && !seen[m[1]]) { seen[m[1]] = true; candidates.push(m[1]); }
+        }
+        var npcs = (ptRead().pt && ptRead().pt.npcs) || {};
+        for (var k in npcs) { var nn = String(npcs[k] && npcs[k].name || k); if (!seen[nn]) { seen[nn] = true; candidates.push(nn); } }
+        // 排除：当前在场的（已在剧情里，不需要登场事件）、上一事件同一人、冷却中的
+        var plot = await ptRecentPlot();
+        var inScene = ptInScene(plot);
+        candidates = candidates.filter(function (n) {
+          if (inScene.indexOf(n) !== -1) return false;
+          if (n === evtMeta.lastNpc) return false;
+          var cd = evtMeta.cd || {};
+          if (cd[n] != null && turns - cd[n] < EVT_NPC_COOLDOWN) return false;
+          return true;
+        });
+        if (!candidates.length) return;
+        if (Math.random() >= EVT_CHANCE) return;
+        var who = candidates[Math.floor(Math.random() * candidates.length)];
+        var forms = ['dm', 'visit', 'encounter'];
+        var form = forms[Math.floor(Math.random() * forms.length)];
+        var cdNow = (ptRead().pt && ptRead().pt._evt && ptRead().pt._evt.cd) || {};
+        cdNow[who] = turns;
+        await ptUpdate(function (v) {
+          if (!v.pt) return v;
+          v.pt._evt = v.pt._evt || { turns: turns, last: -99, lastNpc: '', cd: {} };
+          v.pt._evt.last = turns;
+          v.pt._evt.lastNpc = who;
+          v.pt._evt.cd = cdNow;
+          return v;
+        });
+        if (form === 'dm') {
+          enqueueRequest({ reason: who + ' 主动给玩家发来消息——动机按 TA 的档案来（TA 想要什么/能提供什么/性格），也许是试探、也许是求办事、也许是送一个只有 TA 才知道的消息。没被点名的人这一轮不出现', n: '1-2', focus: [ptCanon(who)] });
+        } else {
+          var where = form === 'visit'
+            ? '没有预约，直接出现在了玩家办公室的门口（楼下老魏没有提前打招呼——这次是 TA 自己要来）'
+            : '在玩家即将前往或正在停留的场所里出现（场所由你按剧情与 TA 的场所习惯安排）';
+          var instr = '【事件引导 · 主动登场】' + who + ' ' + where + '。请按 TA 的世界书档案（性格/行为模式/交易偏好/弱点/场所习惯）设计这次登场：TA 为什么来、想要什么、以什么姿态开口。冷冰冰的礼貌；信息隔离照常生效（TA 只知道 TA 该知道的）；本事件只在接下来的一次叙事中发生一次，之后按剧情自然延续；除剧情需要外不要输出 <UpdateVariable> 之外的结构化内容。';
+          try { uninjectPrompts(['piaotiao-event-note']); } catch (e0) {}
+          injectPrompts([{ id: 'piaotiao-event-note', position: 'in_chat', depth: 1, role: 'system', content: instr, should_scan: true }]);
+          ptNotify('info', '📱 有事要发生……');
+        }
+      } catch (eE) { console.warn(PT_TAG, '事件调度失败（不影响私信）', eE); }
+    })();
+  } catch (eT) { console.warn(PT_TAG, '事件调度异常', eT); }
+}
+
 async function ptOnFloorLog() {
   if (_busy || _pending.length) return;
   var vars = ptRead();
@@ -675,6 +742,7 @@ async function ptOnFloorLog() {
   var cfg = ptApiCfg();
   if (!cfg) return;                                        // 未配置独立 API：正文楼什么都不做
   ptStoryScan(true);                                       // v0.3.5：察觉变化 → 剧情私信候选
+  ptEventTick();                                           // v0.3.6：NPC 主动事件调度（私信/登门/偶遇）
   var npcs = sb.npcs || {};
   // 1) 有待复信（NPC 上一条还没被回）→ 让剧情推着有人说话
   var pendingIds = [];
