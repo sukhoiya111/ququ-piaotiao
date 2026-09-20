@@ -733,11 +733,19 @@ function ptEventTick() {
   } catch (eT) { console.warn(PT_TAG, '事件调度异常', eT); }
 }
 
+var _lastFloorSeen = -1;                                   // v0.3.8：楼层去重闸（message_received 一楼会多次触发）
 async function ptOnFloorLog() {
   if (_busy || _pending.length) return;
   var vars = ptRead();
   var sb = (vars && vars.pt) ? vars.pt : null;
   if (!sb || !sb.npcs) return;
+  var curFloor = -1;
+  try { if (typeof getLastMessageId === 'function') curFloor = getLastMessageId(); } catch (e0) {}
+  if (curFloor >= 0) {
+    if (_lastFloorSeen < 0 && sb._lastLogFloor != null) _lastFloorSeen = sb._lastLogFloor;  // 刷新后从聊天级恢复
+    if (curFloor === _lastFloorSeen) return;               // 同楼重放（生成结束/全局脚本/编辑都会再触发）→ 跳过
+    _lastFloorSeen = curFloor;
+  }
   ptStoryScan(false);                                      // v0.3.5：正文出场人物自动入列（建会话不需要 API）
   var cfg = ptApiCfg();
   if (!cfg) return;                                        // 未配置独立 API：正文楼什么都不做
@@ -769,6 +777,7 @@ async function ptOnFloorLog() {
     if (!v.pt._auto) v.pt._auto = { turns: 0, last: -99 };
     v.pt._auto.turns = turns;
     if (hit) v.pt._auto.last = turns;
+    if (curFloor >= 0) v.pt._lastLogFloor = curFloor;      // v0.3.8：持久化已处理楼号（刷新后兜底）
     return v;
   });
   if (hit) enqueueRequest({ reason: '全新的体制内陌生人主动来探路（按素材库现抽）：也许是打探，也许是求办事，也许是送消息投诚', n: '1' });
