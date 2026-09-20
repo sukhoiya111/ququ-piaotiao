@@ -528,6 +528,9 @@ async function ptRunOnce(req) {
       if (row.type === 'tag') continue;
       var exN = v.pt.npcs && v.pt.npcs[id];
       if (exN && exN.muted) continue;                      // 冷处理硬闸
+      // v0.3.9：单人未读上限——未读已 ≥3 的不再收主动消息，防单人轰炸；
+      // 玩家本轮点名要回的人（focus）豁免：回信必须到
+      if (exN && (exN.unread || 0) >= 3 && !(req.focus && req.focus.indexOf(id) !== -1)) continue;
       ptPushThem(v, id, nm, row.type, row.content);
     }
     for (var ti = 0; ti < tags.length; ti++) {
@@ -596,6 +599,12 @@ function ptOnPlayerReply(payload) {
   }, true);
 }
 var AUTO_STRANGER_CHANCE = 0.25, AUTO_STRANGER_MINGAP = 3, AUTO_STRANGER_MAXPENDING = 4;
+// ── v0.3.9：节奏控制（不让玩家"回不完消息"） ──
+// BACKLOG_MAX：全账号未读总数上限——超过后所有"主动私信"（剧情/事件/陌生人/保底）暂停入队，
+// 玩家自己发的回信请求（urgent）不受限；读完/回掉几条后自动恢复。
+// QUIET_TRIGGER：连续 N 次楼层调度完全没有产生任何事件（私信/登门/偶遇都没有）→ 保底轮
+// 随机抽一个"可能有需求"的 NPC 主动发 1 条。≈两个玩家回合（玩家楼+AI楼各计一次）。
+var BACKLOG_MAX = 5, QUIET_TRIGGER = 4, _quietStreak = 0;
 // ── v0.3.5：剧情成员同步（正文出场人物自动入列 + 察觉变化触发剧情私信） ──
 var STORY_DM_CHANCE = 0.35, STORY_DM_COOLDOWN = 8;
 function ptFloorNo() { try { return (parent.SillyTavern && parent.SillyTavern.getContext().chat.length) || 0; } catch (e) { return 0; } }
@@ -660,6 +669,7 @@ function ptStoryScan(allowDm) {
       for (var i = 0; i < toAsk.length; i++) {
         var a = toAsk[i];
         var stanceHint = a.stance === '反抗' ? '质问、警告或冷处理' : a.stance === '共谋' ? '试探合作、递话' : a.stance === '被利用' ? '隐晦地求助' : '小心翼翼地试探';
+        // v0.3.9：剧情私信豁免积压节流——触发本身稀疏（35%+冷却8楼），且被节流会因 _story 已记楼而永久丢失
         enqueueRequest({ reason: a.name + '（' + (a.family || '') + '家的' + a.role + '，察觉度 ' + a.aw + '）在剧情里察觉到了家里的异常。以 TA 的立场主动给玩家发私信：' + stanceHint + '。符合 TA 的身份与性格，冷冰冰的礼貌，不要写成求救信，不要提系统或数值。没被点名的人这一轮不出现', n: '1-2', focus: [ptCanon(a.name)] });
       }
     });
@@ -718,7 +728,8 @@ function ptEventTick() {
           return v;
         });
         if (form === 'dm') {
-          enqueueRequest({ reason: who + ' 主动给玩家发来消息——动机按 TA 的档案来（TA 想要什么/能提供什么/性格），也许是试探、也许是求办事、也许是送一个只有 TA 才知道的消息。没被点名的人这一轮不出现', n: '1-2', focus: [ptCanon(who)] });
+          if (ptUnreadTotal((ptRead().pt) || {}) >= BACKLOG_MAX) return;   // v0.3.9：积压超限，事件私信这轮不发
+        enqueueRequest({ reason: who + ' 主动给玩家发来消息——动机按 TA 的档案来（TA 想要什么/能提供什么/性格），也许是试探、也许是求办事、也许是送一个只有 TA 才知道的消息。没被点名的人这一轮不出现', n: '1-2', focus: [ptCanon(who)] });
         } else {
           var where = form === 'visit'
             ? '没有预约，直接出现在了玩家办公室的门口（楼下老魏没有提前打招呼——这次是 TA 自己要来）'
@@ -731,6 +742,134 @@ function ptEventTick() {
       } catch (eE) { console.warn(PT_TAG, '事件调度失败（不影响私信）', eE); }
     })();
   } catch (eT) { console.warn(PT_TAG, '事件调度异常', eT); }
+}
+
+// ── v0.3.9：节奏工具（未读总量 / 身份短句 / 保底轮） ──
+function ptUnreadTotal(sb) {
+  var n = 0;
+  for (var k in (sb && sb.npcs)) { if (Object.prototype.hasOwnProperty.call(sb.npcs, k)) n += (sb.npcs[k].unread || 0); }
+  return n;
+}
+// 等待回复名单（last=THEM 的人）：保底轮不再追发（真人会干等）
+function ptWaitingMap(sb) {
+  var w = {};
+  for (var k in (sb && sb.npcs)) {
+    if (!Object.prototype.hasOwnProperty.call(sb.npcs, k)) continue;
+    var h = sb.npcs[k].dm_history || [];
+    if (h.length && h[h.length - 1].sender === 'THEM') w[k] = true;
+  }
+  return w;
+}
+// 世界书档案 → 身份短句：标题「## 名 · 职务」的职务 + 「现状:」前 22 字做性格/处境钩子
+function ptTaglineFromDossier(dossier) {
+  var s = String(dossier || '');
+  var t = s.match(/^##\s*(.+)$/m);
+  var head = t ? t[1].trim() : '';
+  var pos = head.indexOf('·');
+  var role = pos !== -1 ? head.slice(pos + 1).trim() : head;
+  var now = s.match(/现状[:：]\s*(.+)/);
+  var hook = now ? String(now[1]).trim() : '';
+  if (hook.length > 22) hook = hook.slice(0, 22);
+  var out = role + (hook ? '，' + hook : '');
+  return out.slice(0, 42);
+}
+// 家庭成员身份句（家庭薄条目没有个人档案，从账本拼）
+function ptFamilyTagline(sd, name) {
+  var fm = (sd && sd.families) || {};
+  for (var fid in fm) {
+    var f = fm[fid];
+    var fname = String(ptBare(f.name) || fid);
+    var head = f.head || {};
+    if (String(ptBare(head.name) || '') === name) return fname + '一家之主，话里带钩';
+    var sp = f.spouse || {};
+    if (String(ptBare(sp.name) || '') === name) return fname + '家主配偶，同谋度' + (ptBare(sp.complicity) || 0);
+    var ch = f.children || {};
+    for (var cid in ch) {
+      if (String(ptBare(ch[cid].name) || '') === name) return fname + '子女，立场' + String(ptBare(ch[cid].stance) || '未知');
+    }
+  }
+  return '';
+}
+// 每楼补抓：给缺 tagline 的 NPC 填身份短句（读本地世界书/账本，不调 API）
+var _taglineBusy = false;
+function ptEnsureTaglines() {
+  if (_taglineBusy) return;
+  _taglineBusy = true;
+  (async function () {
+    try {
+      var v = ptRead();
+      var sb = v && v.pt;
+      if (!sb || !sb.npcs) return;
+      var sd = ptStatData() || {};
+      var jobs = [];
+      for (var k in sb.npcs) {
+        if (sb.npcs[k].tagline) continue;
+        var nm = String(sb.npcs[k].name || k);
+        var famLine = ptFamilyTagline(sd, nm);
+        if (famLine) { jobs.push({ id: k, line: famLine }); continue; }
+        if (sd.contacts && sd.contacts[k]) {
+          var c = sd.contacts[k];
+          jobs.push({ id: k, line: String(ptBare(c.group) || '体制内') + '联系人，对你' + String(ptBare(c.attitude) || '保持观望') });
+          continue;
+        }
+        if (sb.npcs[k].archetype) { jobs.push({ id: k, line: String(sb.npcs[k].archetype) + '，主动寻上门' }); continue; }
+        if (PT_WB_KEY[nm]) jobs.push({ id: k, wb: PT_WB_KEY[nm] });
+      }
+      if (!jobs.length) return;
+      for (var i = 0; i < jobs.length; i++) {
+        var it = jobs[i];
+        if (it.wb) {
+          var dossier = await ptWbContent(it.wb, '');
+          if (!dossier) continue;
+          it.line = ptTaglineFromDossier(dossier);
+        }
+        if (!it.line) continue;
+        (function (id2, line2) {
+          ptUpdate(function (v2) {
+            if (v2.pt && v2.pt.npcs[id2] && !v2.pt.npcs[id2].tagline) v2.pt.npcs[id2].tagline = line2;
+            return v2;
+          }).catch(function () {});
+        })(it.id, it.line);
+      }
+    } catch (e) { console.warn(PT_TAG, '身份短句抓取失败（不影响私信）', e); }
+    finally { _taglineBusy = false; }
+  })();
+}
+// 保底轮：连续 QUIET_TRIGGER 次楼层调度毫无动静 → 随机抽一个"可能有需求"的人主动开口
+function ptQuietPing() {
+  var v = ptRead();
+  var sb = v && v.pt;
+  if (!sb) return;
+  if (ptUnreadTotal(sb) >= BACKLOG_MAX) return;      // 积压上限内才保底
+  var waiting = ptWaitingMap(sb);
+  var sd = ptStatData() || {};
+  var contacts = sd.contacts || {};
+  var withWant = [], others = [];
+  // 账本联系人：有 wants 的优先（TA 最可能主动来找）
+  for (var cid in contacts) {
+    var c = contacts[cid];
+    var nm = String(ptBare(c.name) || cid);
+    var id = ptCanon(nm);
+    var npc = sb.npcs[id];
+    if (npc && npc.muted) continue;
+    if (waiting[id]) continue;
+    if (npc && (npc.unread || 0) >= 2) continue;
+    withWant.push(id);
+  }
+  // 已有会话的人（有来往，TA 也可能惦记着事）
+  for (var k in sb.npcs) {
+    var n = sb.npcs[k];
+    if (n.muted || waiting[k] || (n.unread || 0) >= 2) continue;
+    if (withWant.indexOf(k) !== -1) continue;
+    if (!(n.dm_history || []).length) continue;      // 从没说过话的空会话不保底
+    others.push(k);
+  }
+  var pool = (withWant.length && Math.random() < 0.7) ? withWant : (others.length ? others : withWant);
+  if (!pool.length) return;
+  var pick = pool[Math.floor(Math.random() * pool.length)];
+  var pname = ptIdToName(sb, pick);
+  enqueueRequest({ reason: pname + ' 好像有事找你——按 TA 的档案（性格/想要什么/能提供什么），顺着最近剧情发来私信：也许是催问、试探、递话或求办事。冷冰冰的礼貌，不要提系统或数值。只让 ' + pname + ' 本人回应，别人不要出现', n: '1-2', focus: [pick] });
+  console.info(PT_TAG, '保底轮：', pname, '（连续', _quietStreak, '次调度无事件）');
 }
 
 var _lastFloorSeen = -1;                                   // v0.3.8：楼层去重闸（message_received 一楼会多次触发）
@@ -751,6 +890,23 @@ async function ptOnFloorLog() {
   if (!cfg) return;                                        // 未配置独立 API：正文楼什么都不做
   ptStoryScan(true);                                       // v0.3.5：察觉变化 → 剧情私信候选
   ptEventTick();                                           // v0.3.6：NPC 主动事件调度（私信/登门/偶遇）
+  // v0.3.9：节奏观测——1.6s 后看这波调度有没有产生任何动静（请求入队/事件命中）；
+  // 连续 QUIET_TRIGGER 次毫无动静 → 保底轮随机抽一个有需求的人开口（回信请求不算事件）
+  var qBefore = _reqQueue.length + (_busy ? 1 : 0);
+  var evtLastBefore = (sb._evt && sb._evt.last != null) ? sb._evt.last : -99;
+  setTimeout(function () {
+    try {
+      var nowV = ptRead();
+      var ptNow = nowV && nowV.pt;
+      if (!ptNow) return;
+      var qAfter = _reqQueue.length + (_busy ? 1 : 0);
+      var evtNow = (ptNow._evt && ptNow._evt.last != null) ? ptNow._evt.last : -99;
+      if (qAfter > qBefore || evtNow !== evtLastBefore) { _quietStreak = 0; return; }
+      _quietStreak++;
+      if (_quietStreak >= QUIET_TRIGGER) ptQuietPing();
+    } catch (eQ) { console.warn(PT_TAG, '节奏观测失败', eQ); }
+  }, 1600);
+  ptEnsureTaglines();                                      // v0.3.9：身份短句补抓（读本地档案，不调 API）
   var npcs = sb.npcs || {};
   // 1) 有待复信（NPC 上一条还没被回）→ 让剧情推着有人说话
   var pendingIds = [];
@@ -760,11 +916,13 @@ async function ptOnFloorLog() {
     if (h.length && h[h.length - 1].sender === 'THEM') pendingIds.push(k);
   }
   if (pendingIds.length && pendingIds.length <= 3) {
+    if (ptUnreadTotal(sb) >= BACKLOG_MAX) return;          // v0.3.9：积压超限，主动私信全线暂停
     var names = pendingIds.map(function (id) { return (sb.npcs[id] && sb.npcs[id].name) || id; });
     enqueueRequest({ reason: '剧情推进后，这几个人里该有人顺着正文的事发来新消息：' + names.join('、') + '。没有新鲜事的人保持沉默', n: '0-2', focus: [] });
     return;
   }
   // 2) 偶尔一个体制陌生人主动来探路
+  if (ptUnreadTotal(sb) >= BACKLOG_MAX) return;            // v0.3.9：积压超限，不再加新噪声
   var auto = sb._auto || { turns: 0, last: -99 };
   var turns = (auto.turns || 0) + 1;
   var unreadTotal = 0;
@@ -780,7 +938,7 @@ async function ptOnFloorLog() {
     if (curFloor >= 0) v.pt._lastLogFloor = curFloor;      // v0.3.8：持久化已处理楼号（刷新后兜底）
     return v;
   });
-  if (hit) enqueueRequest({ reason: '全新的体制内陌生人主动来探路（按素材库现抽）：也许是打探，也许是求办事，也许是送消息投诚', n: '1' });
+  if (hit && ptUnreadTotal(sb) < BACKLOG_MAX) enqueueRequest({ reason: '全新的体制内陌生人主动来探路（按素材库现抽）：也许是打探，也许是求办事，也许是送消息投诚', n: '1' });
 }
 
 // 请求队列（批量合并）
@@ -884,7 +1042,8 @@ function ptMount() {
   eventOn('pt_request_dm', function (payload) { ptOnPlayerReply(payload || {}); }); // TH 事件监听器直接收 payload 本体（非 e.detail）
   eventOn('pt_floor_log', function () { ensureSeed(); ptOnFloorLog(); });
   ensureSeed();
-  setInterval(function () { try { ensureSeed(); } catch (e) {} }, 10000);   // 换聊天/新聊天后补种（幂等，聊天级 _seeded 挡重复）
+  ptEnsureTaglines();                                      // v0.3.9：挂载即补一次身份短句
+  setInterval(function () { try { ensureSeed(); ptEnsureTaglines(); } catch (e) {} }, 10000);   // 换聊天/新聊天后补种（幂等，聊天级 _seeded 挡重复）
   console.info(PT_TAG, '已挂载：私信生成通道（独立API直连 + 行格式解析 + 队列合并/补漏 + injectPrompts 主线感知）');
 }
 ptMount();

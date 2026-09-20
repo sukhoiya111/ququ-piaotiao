@@ -323,12 +323,13 @@
     var close = panelEl.querySelector('#piaotiao-close');
     if (close) close.addEventListener('click', function (e) { e.stopPropagation(); closePanel(); });
     panelEl.querySelectorAll('[data-tab]').forEach(function (el) {
-      el.addEventListener('click', function (e) { e.stopPropagation(); currentView = el.getAttribute('data-tab'); currentConv = null; render(); });
+      el.addEventListener('click', function (e) { e.stopPropagation(); currentView = el.getAttribute('data-tab'); currentConv = null; _netSel = null; render(); });
     });
     if (currentView === 'wechat' && currentConv) bindThread();
     else if (currentView === 'wechat') bindWechatList();
     else if (currentView === 'settings') bindSettings();
     else if (currentView === 'contacts') bindContacts();
+    else if (currentView === 'network') bindNetwork();
   }
 
   // ── 微信列表 ──
@@ -424,7 +425,11 @@
     var queued = (ob[currentConv] || []).length;
     var QUICK = ['这事包在我身上。', '今晚见个面，细说。', '我尽量办。', '我会留意。', '老规矩。', '事情有进展，电话里不便说。'];
     return '<div class="pt-chat">' +
-      '<div class="pt-chat-head" id="piaotiao-back"><span style="color:var(--dim);font-size:16px;">‹</span><b>' + esc(name) + '</b>' +
+      '<div class="pt-chat-head" id="piaotiao-back"><span style="color:var(--dim);font-size:16px;">‹</span>' +
+      '<span style="display:inline-block;line-height:1.15;max-width:230px;"><b>' + esc(name) + '</b>' +
+      // v0.3.9：姓名下一行身份性格短句（引擎抓档案/账本生成，存 pt.npcs[*].tagline）
+      (npc.tagline ? '<span style="display:block;font-size:10px;font-weight:normal;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(npc.tagline) + '</span>' : '') +
+      '</span>' +
       (queued > 0 ? '<span style="margin-left:auto;font-size:11px;color:var(--blue);">✍️ 待发' + queued + '条</span>' : '') + '</div>' +
       '<div class="pt-msgs">' + (items.join('') || '<div style="text-align:center;color:var(--dim);padding:20px;font-size:12px;">暂无消息</div>') + '</div>' +
       typing +
@@ -529,12 +534,23 @@
     var sd = ptStatData() || {};
     var cs = sd.contacts || {};
     var rows = '';
+    var ptv = ptRead();
+    var allNpcs = (ptv && ptv.pt && ptv.pt.npcs) || {};
+    function taglineOf(npcId, npcName) {
+      var n = allNpcs[npcId] || allNpcs[npcName];
+      return (n && n.tagline) ? String(n.tagline) : '';
+    }
+    function taglineHtml(line) {
+      return line ? '<span style="display:block;font-size:10px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(line) + '</span>' : '';
+    }
     for (var id in cs) {
       var c = cs[id];
       var status = ptBare(c.status) || '?';
       var color = status === 'hostile' ? 'var(--red)' : (status === 'active' || status === 'available') ? 'var(--green)' : 'var(--dim)';
       rows += '<div class="pt-row" data-contact="' + esc(id) + '"><span class="pt-ava">' + esc(String(ptBare(c.name) || id).slice(0, 1)) + '</span>' +
-        '<span class="pt-mid"><span class="pt-name">' + esc(ptBare(c.name) || id) + '<span style="font-size:11px;color:' + color + ';">' + esc(ptBare(c.attitude) || '') + '·' + esc(status) + '</span></span>' +
+        '<span class="pt-mid"><span class="pt-name">' + esc(ptBare(c.name) || id) + '<span style="font-size:11px;color:' + color + ';">' + esc(ptBare(c.attitude) || '') + '·' + esc(status) + '</span>' +
+        // v0.3.9：姓名下一行身份性格短句（引擎从世界书档案抓取，兜底用账本 group/attitude 拼）
+        taglineHtml(taglineOf(id, ptBare(c.name) || id) || ((ptBare(c.group) || '体制内') + '联系人，对你' + (ptBare(c.attitude) || '保持观望'))) + '</span>' +
         '<span class="pt-meta">想要：' + esc(ptBare(c.wants) || '—') + '｜能办：' + esc(ptBare(c.can_provide) || '—') + '｜他欠我' + ((c.favors_owed || []).length) + '·我欠他' + ((c.favors_debt || []).length) + '</span></span></div>';
     }
     var fams = sd.families || {};
@@ -549,7 +565,9 @@
         if (!nm) return '';
         var roleTag = role === '一家之主' ? '' : '<span style="font-size:10px;color:var(--gold);margin-left:6px;">' + role + '</span>';
         return '<div class="pt-row" data-contact="' + esc(nm) + '"><span class="pt-ava family">' + esc(nm.slice(0, 1)) + '</span>' +
-          '<span class="pt-mid"><span class="pt-name">' + esc(nm) + roleTag + '<span style="font-size:11px;color:var(--dim);">' + esc(ptBare(f.name) || '') + '家' + (rel !== null && rel !== undefined ? '·关系' + rel : '') + '</span></span>' +
+          '<span class="pt-mid"><span class="pt-name">' + esc(nm) + roleTag + '<span style="font-size:11px;color:var(--dim);">' + esc(ptBare(f.name) || '') + '家' + (rel !== null && rel !== undefined ? '·关系' + rel : '') + '</span>' +
+          // v0.3.9：家庭成员身份句（账本家庭结构拼接；引擎抓的 tagline 优先）
+          taglineHtml(taglineOf(nm, nm) || ((ptBare(f.name) || '') + '家' + (role === '一家之主' ? '家主' : role) + '，家里的事瞒着TA也瞒着外头')) + '</span>' +
           '<span class="pt-meta">' + (extra || '') + '</span></span></div>';
       }
       frows += famRow(hid, '一家之主', ptBare(head.relationship) || 0, '请求：' + esc(f.request ? ptBare(f.request.type) + '/' + ptBare(f.request.status) : '无') + '｜暴露：' + (ptBare(f.exposure_risk) || 0));
@@ -572,29 +590,76 @@
     });
   }
 
-  // ── 关系网 ──
+  // ── 关系网（v0.3.9：节点提纲 + 点击节点看详情） ──
+  var _netSel = null;                                        // 当前选中的节点（null=网络图视图）
   function viewNetwork() {
     var sd = ptStatData() || {};
     var cs = sd.contacts || {};
+    var ptv = ptRead();
+    var allNpcs = (ptv && ptv.pt && ptv.pt.npcs) || {};
+    function outlineOf(id, c) {
+      var n = allNpcs[id];
+      if (n && n.tagline) return String(n.tagline);
+      return String(ptBare(c.group) || '体制内') + '，对你' + String(ptBare(c.attitude) || '观望');
+    }
     var ids = Object.keys(cs);
+    // 详情视图：点开某个节点
+    if (_netSel && cs[_netSel]) {
+      var cD = cs[_netSel];
+      var nD = allNpcs[_netSel];
+      var tagD = (nD && nD.tagline) || outlineOf(_netSel, cD);
+      function drow(label, v, color) {
+        return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px;"><span style="color:var(--dim);white-space:nowrap;">' + label + '</span><span style="color:' + (color || 'var(--text)') + ';text-align:right;">' + esc(String(v)) + '</span></div>';
+      }
+      var lev = cD.leverage || [];
+      var relD = Number(ptBare(cD.relationship)) || 0;
+      var owedD = (cD.favors_owed || []).length, debtD = (cD.favors_debt || []).length;
+      return '<div style="padding:10px 14px 4px;"><span id="piaotiao-net-back" style="cursor:pointer;color:var(--dim);font-size:13px;">‹ 返回网络</span></div>' +
+        '<div style="padding:6px 16px 12px;border-bottom:1px solid var(--line);"><b style="font-size:16px;">' + esc(ptBare(cD.name) || _netSel) + '</b>' +
+        '<div style="font-size:11px;color:var(--dim);margin-top:3px;">' + esc(tagD) + '</div></div>' +
+        drow('关系', relD + ' / 100', relD >= 60 ? 'var(--green)' : relD < 20 ? 'var(--red)' : 'var(--text)') +
+        drow('对你的态度', ptBare(cD.attitude) || '—') +
+        drow('TA 想要', ptBare(cD.wants) || '—') +
+        drow('TA 能办', ptBare(cD.can_provide) || '—') +
+        drow('把柄', lev.length ? esc(lev.map(function (l) { return ptBare(l) || String(l); }).join('、')) : '暂无', lev.length ? 'var(--gold)' : 'var(--dim)') +
+        drow('把柄强度', (Number(ptBare(cD.leverage_strength)) || 0) + ' / 5') +
+        drow('人情账', '他欠我 ' + owedD + ' · 我欠他 ' + debtD) +
+        drow('状态', String(ptBare(cD.status) || '—'), String(ptBare(cD.status)) === 'hostile' ? 'var(--red)' : 'var(--green)');
+    }
     if (!ids.length) return '<div style="padding:24px;color:var(--dim);text-align:center;">暂无节点</div>';
     var W = 320, H = 380, cx = W / 2, cy = H / 2, R = 120;
     var nodes = ids.map(function (id, i) {
       var c = cs[id];
       var ang = (Math.PI * 2 * i) / ids.length - Math.PI / 2;
       var rel = Number(ptBare(c.relationship)) || 0;
-      return { name: String(ptBare(c.name) || id), rel: rel, x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) };
+      return { id: id, name: String(ptBare(c.name) || id), rel: rel, x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang), outline: outlineOf(id, c) };
     });
     var lines = nodes.map(function (n) {
       return '<line x1="' + cx + '" y1="' + cy + '" x2="' + n.x + '" y2="' + n.y + '" stroke="' + (n.rel >= 0 ? C.green : C.red) + '" stroke-width="1.2" opacity="0.55" />';
     }).join('');
+    // v0.3.9：节点圈姓名 + 圈下 2-4 字提纲；点击节点看详情
     var dots = nodes.map(function (n) {
-      return '<circle cx="' + n.x + '" cy="' + n.y + '" r="22" fill="' + C.panel + '" stroke="' + C.blue + '" />' +
-        '<text x="' + n.x + '" y="' + (n.y + 4) + '" text-anchor="middle" font-size="11" fill="' + C.text + '">' + esc(n.name.slice(0, 4)) + '</text>';
+      var words = n.outline.replace(/[，,。；].*$/, '').slice(0, 6);
+      return '<g data-netnode="' + esc(n.id) + '" style="cursor:pointer;">' +
+        '<circle cx="' + n.x + '" cy="' + n.y + '" r="24" fill="' + C.panel + '" stroke="' + C.blue + '" />' +
+        '<text x="' + n.x + '" y="' + (n.y + 1) + '" text-anchor="middle" font-size="11" fill="' + C.text + '">' + esc(n.name.slice(0, 4)) + '</text>' +
+        '<text x="' + n.x + '" y="' + (n.y + 38) + '" text-anchor="middle" font-size="9" fill="' + C.dim + '">' + esc(words) + '</text></g>';
     }).join('');
-    return '<div style="flex:1;display:flex;align-items:center;"><svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:100%;">' + lines +
+    return '<div style="padding:8px 14px 0;font-size:11px;color:var(--dim);">点节点看详情</div>' +
+      '<div style="flex:1;display:flex;align-items:center;"><svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:100%;">' + lines +
       '<circle cx="' + cx + '" cy="' + cy + '" r="30" fill="' + C.mine + '" stroke="' + C.green + '" />' +
       '<text x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" font-size="12" fill="#fff">我</text>' + dots + '</svg></div>';
+  }
+  function bindNetwork() {
+    var back = panelEl.querySelector('#piaotiao-net-back');
+    if (back) back.addEventListener('click', function (e) { e.stopPropagation(); _netSel = null; render(); });
+    panelEl.querySelectorAll('[data-netnode]').forEach(function (el) {
+      el.addEventListener('click', function (e) {
+        e.stopPropagation();
+        _netSel = el.getAttribute('data-netnode');
+        render();
+      });
+    });
   }
 
   // ── 备忘录 ──
@@ -613,6 +678,29 @@
     }
     function num(x) { return ptBare(x) != null ? ptBare(x) : 0; }
     var expo = Number(num(d.exposure_global)) || 0;
+    // ── v0.3.9：当前待办（账本 active 事件 + 未读私信 + 待发队列） ──
+    var todos = '';
+    var evs = sd.events || {};
+    for (var eid in evs) {
+      var ev = evs[eid];
+      if (String(ptBare(ev.status) || '') !== 'active') continue;
+      var urg = String(ptBare(ev.urgency) || '');
+      var urgColor = urg === '高' ? 'var(--red)' : urg === '中' ? 'var(--gold)' : 'var(--dim)';
+      todos += '<div style="padding:8px 14px;font-size:12px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;">' +
+        '<span>☐ ' + esc(ptBare(ev.type) || '事项') + ' · ' + esc(ptBare(ev.source) || '?') + '</span>' +
+        '<span style="color:' + urgColor + ';white-space:nowrap;">' + esc(urg || '—') + '</span></div>';
+    }
+    var ptNow = ptRead();
+    var npcNow = (ptNow && ptNow.pt && ptNow.pt.npcs) || {};
+    var unreadSum = 0;
+    for (var uk in npcNow) unreadSum += (npcNow[uk].unread || 0);
+    var obNow = loadOutbox();
+    var queuedSum = 0;
+    for (var ok in obNow) queuedSum += (obNow[ok] || []).length;
+    if (unreadSum > 0) todos += '<div style="padding:8px 14px;font-size:12px;border-bottom:1px solid var(--line);">💬 未读私信 <b style="color:var(--gold);">' + unreadSum + '</b> 条</div>';
+    if (queuedSum > 0) todos += '<div style="padding:8px 14px;font-size:12px;border-bottom:1px solid var(--line);">✍️ 待发消息 <b style="color:var(--blue);">' + queuedSum + '</b> 条</div>';
+    var todoBlock = '<div style="padding:10px 14px;color:var(--dim);font-size:12px;">当前待办</div>' +
+      (todos || '<div style="padding:10px 14px;color:var(--dim);font-size:12px;">暂无待办——正好歇口气</div>');
     return '<div style="padding-top:4px;">' +
       row('影响力', num(p.influence)) +
       row('资金', '¥ ' + Number(num(p.capital)).toLocaleString('zh-CN')) +
@@ -620,7 +708,7 @@
       row('暴露风险', expo + ' / 100', expo > 50 ? 'var(--red)' : 'var(--text)') +
       row('人情余额', (num(d.favors_balance)) + '（我欠 ' + (num(d.favors_debt_total)) + '）') +
       row('关系网等级', num(d.network_level), 'var(--green)') +
-      '</div><div style="padding:10px 14px;color:var(--dim);font-size:12px;">人情账目</div>' + (favors || '<div style="padding:10px 14px;color:var(--dim);font-size:12px;">暂无往来</div>');
+      '</div>' + todoBlock + '<div style="padding:10px 14px;color:var(--dim);font-size:12px;">人情账目</div>' + (favors || '<div style="padding:10px 14px;color:var(--dim);font-size:12px;">暂无往来</div>');
   }
 
   // ── 图鉴（P5：跨聊天结局收藏；解锁记录在脚本级持久存储，MVU 只带本局结果） ──
