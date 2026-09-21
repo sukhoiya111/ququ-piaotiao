@@ -580,10 +580,22 @@
   function closeMsgMenu() { if (_menuEl && _menuEl.parentNode) _menuEl.parentNode.removeChild(_menuEl); _menuEl = null; }
 
   // ── 联系人（stat_data 真源；点行进会话） ──
+  // v0.3.15：客户/关系人分类系统——家庭按「家姓+家」自动归类（家姓缺省时取户主姓氏首字），
+  // 其余联系人按 group 值分栏；已归入家庭块的人不再在分栏里重复出现
+  var CONTACT_GROUP_ORDER = ['官员', '管理者', '中间人', '亲属', '其他'];
+  function famLabelOf(fid, f) {
+    var raw = String(ptBare(f && f.name) || '').trim();
+    if (!raw) {
+      var hn = String(ptBare(f && f.head && f.head.name) || '').trim();
+      raw = hn ? hn.slice(0, 1) : String(fid || '');
+    }
+    if (!raw) return '';
+    return /家$/.test(raw) ? raw : raw + '家';
+  }
   function viewContacts() {
     var sd = ptStatData() || {};
     var cs = sd.contacts || {};
-    var rows = '';
+    var fams = sd.families || {};
     var ptv = ptRead();
     var allNpcs = (ptv && ptv.pt && ptv.pt.npcs) || {};
     function taglineOf(npcId, npcName) {
@@ -594,51 +606,93 @@
       // 优先显示能解决什么问题（can_provide），回退到身份短句（tagline），最后兜底 group+attitude
       var cp = ptBare(c && c.can_provide);
       if (cp && cp !== '—') return '能办：' + String(cp);
-      return taglineOf(npcId, npcName) || ((ptBare(c && c.group) || '体制内') + '联系人，对你' + (ptBare(c && c.attitude) || '保持观望'));
+      return taglineOf(npcId, npcName) || ((ptBare(c && c.group) || '其他') + '，对你' + (ptBare(c && c.attitude) || '保持观望'));
     }
     function taglineHtml(line) {
       return line ? '<span style="display:block;font-size:10px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(line) + '</span>' : '';
     }
-    for (var id in cs) {
-      var c = cs[id];
+    function groupHeader(label) {
+      return '<div style="padding:6px 14px 2px;font-size:11px;color:var(--gold);">' + esc(label) + '</div>';
+    }
+    function contactRow(id, c) {
+      var nm = String(ptBare(c.name) || id);
       var status = ptBare(c.status) || '?';
       var color = status === 'hostile' ? 'var(--red)' : (status === 'active' || status === 'available') ? 'var(--green)' : 'var(--dim)';
-      rows += '<div class="pt-row" data-contact="' + esc(id) + '"><span class="pt-ava">' + esc(String(ptBare(c.name) || id).slice(0, 1)) + '</span>' +
-        '<span class="pt-mid"><span class="pt-name">' + esc(ptBare(c.name) || id) + '<span style="font-size:11px;color:' + color + ';">' + esc(ptBare(c.attitude) || '') + '·' + esc(status) + '</span>' +
-        taglineHtml(contactPreview(c, id, ptBare(c.name) || id)) + '</span>' +
+      return '<div class="pt-row" data-contact="' + esc(id) + '"><span class="pt-ava">' + esc(nm.slice(0, 1)) + '</span>' +
+        '<span class="pt-mid"><span class="pt-name">' + esc(nm) + '<span style="font-size:11px;color:' + color + ';">' + esc(ptBare(c.attitude) || '') + '·' + esc(status) + '</span>' +
+        taglineHtml(contactPreview(c, id, nm)) + '</span>' +
         '<span class="pt-meta">想要：' + esc(ptBare(c.wants) || '—') + '｜他欠我' + ((c.favors_owed || []).length) + '·我欠他' + ((c.favors_debt || []).length) + '</span></span></div>';
     }
-    var fams = sd.families || {};
-    var famBlocks = '';
-    function famRow(f, name, role, rel, extra) {
+    // 账本联系人按人名建索引：家庭成员若同时有联系人文录，行内补出其「能办」与人情账（不丢信息）
+    var contactByName = {};
+    for (var cid0 in cs) {
+      var c0 = cs[cid0];
+      var nm0 = String(ptBare(c0.name) || cid0).trim();
+      if (nm0 && !contactByName[nm0]) contactByName[nm0] = { id: cid0, c: c0 };
+    }
+    function contactMetaSuffix(nm) {
+      var hit = contactByName[nm];
+      if (!hit) return '';
+      return '｜他欠我' + ((hit.c.favors_owed || []).length) + '·我欠他' + ((hit.c.favors_debt || []).length);
+    }
+    var claimed = {};                       // 已归入家庭块的人名，下方分栏不再重复
+    function famRow(famLabel, name, role, rel, extra) {
       var nm = String(name || '').trim();
       if (!nm) return '';
+      claimed[nm] = true;
       var roleTag = role === '一家之主' ? '' : '<span style="font-size:10px;color:var(--gold);margin-left:6px;">' + role + '</span>';
+      var sub = taglineOf(nm, nm) ||
+        (contactByName[nm] ? contactPreview(contactByName[nm].c, contactByName[nm].id, nm) : '') ||
+        (famLabel + (role === '一家之主' ? '家主' : role) + '，家里的事瞒着TA也瞒着外头');
       return '<div class="pt-row" data-contact="' + esc(nm) + '"><span class="pt-ava family">' + esc(nm.slice(0, 1)) + '</span>' +
-        '<span class="pt-mid"><span class="pt-name">' + esc(nm) + roleTag + '<span style="font-size:11px;color:var(--dim);">' + esc(ptBare(f.name) || '') + '家' + (rel !== null && rel !== undefined ? '·关系' + rel : '') + '</span>' +
-        taglineHtml(taglineOf(nm, nm) || ((ptBare(f.name) || '') + '家' + (role === '一家之主' ? '家主' : role) + '，家里的事瞒着TA也瞒着外头')) + '</span>' +
-        '<span class="pt-meta">' + (extra || '') + '</span></span></div>';
+        '<span class="pt-mid"><span class="pt-name">' + esc(nm) + roleTag + '<span style="font-size:11px;color:var(--dim);">' + esc(famLabel) + (rel !== null && rel !== undefined && rel !== '' ? '·关系' + esc(String(ptBare(rel))) : '') + '</span>' +
+        taglineHtml(sub) + '</span>' +
+        '<span class="pt-meta">' + (extra || '') + contactMetaSuffix(nm) + '</span></span></div>';
     }
+    var famBlocks = '';
     for (var fid in fams) {
       var f = fams[fid];
+      var famLabel = famLabelOf(fid, f);
       var head = f.head || {};
-      var hid = (head && ptBare(head.name)) || fid;
-      var familyName = ptBare(f.name) || fid;
+      var hid = String(ptBare(head.name) || '').trim();
       var frows = '';
-      frows += famRow(f, hid, '一家之主', ptBare(head.relationship) || 0, '请求：' + esc(f.request ? ptBare(f.request.type) + '/' + ptBare(f.request.status) : '无') + '｜暴露：' + (ptBare(f.exposure_risk) || 0));
+      if (hid) frows += famRow(famLabel, hid, '一家之主', ptBare(head.relationship), '请求：' + esc(f.request ? ptBare(f.request.type) + '/' + ptBare(f.request.status) : '无') + '｜暴露：' + (ptBare(f.exposure_risk) || 0));
       var sp = f.spouse || {};
-      if (ptBare(sp.name)) frows += famRow(f, ptBare(sp.name), '配偶', ptBare(sp.relationship) || 0, '察觉：' + (ptBare(sp.awareness) || 0) + '｜同谋：' + (ptBare(sp.complicity) || 0));
+      if (String(ptBare(sp.name) || '').trim()) frows += famRow(famLabel, ptBare(sp.name), '配偶', ptBare(sp.relationship), '察觉：' + (ptBare(sp.awareness) || 0) + '｜同谋：' + (ptBare(sp.complicity) || 0));
       var ch = f.children || {};
       for (var cid in ch) {
-        var c = ch[cid];
-        if (!ptBare(c.name)) continue;
-        frows += famRow(f, ptBare(c.name), '子女', ptBare(c.relationship) || 0, '察觉：' + (ptBare(c.awareness) || 0) + '｜立场：' + esc(ptBare(c.stance) || '—'));
+        var kid = ch[cid];
+        if (!String(ptBare(kid.name) || '').trim()) continue;
+        frows += famRow(famLabel, ptBare(kid.name), '子女', ptBare(kid.relationship), '察觉：' + (ptBare(kid.awareness) || 0) + '｜立场：' + esc(ptBare(kid.stance) || '—'));
       }
-      if (frows) famBlocks += '<div style="padding:6px 14px 2px;font-size:11px;color:var(--gold);">' + esc(familyName) + '家</div>' + frows;
+      var oth = (f.others && f.others.length) ? f.others : [];
+      for (var oi = 0; oi < oth.length; oi++) {
+        var oe = oth[oi];
+        var onm = String(typeof oe === 'string' ? oe : (ptBare(oe && oe.name) || '')).trim();
+        if (!onm) continue;
+        frows += famRow(famLabel, onm, '同住亲属', (oe && typeof oe === 'object') ? ptBare(oe.relationship) : null, '');
+      }
+      if (frows) famBlocks += groupHeader(famLabel) + frows;
+    }
+    var buckets = {}, tailOrder = [];
+    for (var id in cs) {
+      var c = cs[id];
+      var nm = String(ptBare(c.name) || id).trim();
+      if (claimed[nm]) continue;
+      var g = String(ptBare(c.group) || '其他').trim() || '其他';
+      if (!buckets[g]) { buckets[g] = []; if (CONTACT_GROUP_ORDER.indexOf(g) < 0) tailOrder.push(g); }
+      buckets[g].push(contactRow(id, c));
+    }
+    var groupBlocks = '';
+    var order = CONTACT_GROUP_ORDER.concat(tailOrder);
+    for (var gi = 0; gi < order.length; gi++) {
+      var gk = order[gi];
+      if (!buckets[gk] || !buckets[gk].length) continue;
+      groupBlocks += groupHeader(gk) + buckets[gk].join('');
     }
     return '<div style="padding:10px 14px;font-size:12px;color:var(--dim);">点联系人可直达会话（档案由账本驱动）</div>' +
-      (famBlocks || '') +
-      (rows ? '<div style="padding:6px 14px 2px;font-size:11px;color:var(--gold);">体制联系人</div>' + rows : '<div style="padding:24px;color:var(--dim);text-align:center;">关系网尚未展开</div>');
+      famBlocks + groupBlocks +
+      ((famBlocks || groupBlocks) ? '' : '<div style="padding:24px;color:var(--dim);text-align:center;">关系网尚未展开</div>');
   }
   function bindContacts() {
     panelEl.querySelectorAll('[data-contact]').forEach(function (el) {
@@ -659,7 +713,7 @@
       if (cp && cp !== '—') return '能办：' + String(cp);
       var n = allNpcs[id] || allNpcs[ptBare(c.name)];
       if (n && n.tagline) return String(n.tagline);
-      return String(ptBare(c.group) || '体制内') + '，对你' + String(ptBare(c.attitude) || '观望');
+      return String(ptBare(c.group) || '其他') + '，对你' + String(ptBare(c.attitude) || '观望');
     }
     // 聚合三类登场来源；同名去重：联系人 > 家庭成员 > 微信登场者
     var nodes = [];

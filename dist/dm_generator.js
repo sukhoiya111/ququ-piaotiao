@@ -204,7 +204,22 @@ function ptDescribeStateFor(sb, id) {
     else for (var ck in sd.contacts) { if (String(ptBare(sd.contacts[ck].name) || '').trim() === nm) { c = sd.contacts[ck]; break; } }
   }
   if (c) {
-    lines.push('【你自己（' + nm + '）】身份:' + (ptBare(c.group) || '?') + '；对玩家的态度:' + (ptBare(c.attitude) || '观望') +
+    // v0.3.15：家庭成员的 group 统一写「亲属」（归类口径），但提示词里「身份:亲属」太虚——
+    // 挂上家庭身份（陈家家主/配偶/子女），让模型拿到的是有用的身份信息
+    var famTag = '';
+    var fm2 = sd.families || {};
+    for (var fid2 in fm2) {
+      var f2 = fm2[fid2];
+      var raw2 = String(ptBare(f2.name) || fid2);
+      var fl2 = /家$/.test(raw2) ? raw2 : raw2 + '家';
+      if (String(ptBare(f2.head && f2.head.name) || '') === nm) { famTag = fl2 + '家主'; break; }
+      if (String(ptBare(f2.spouse && f2.spouse.name) || '') === nm) { famTag = fl2 + '配偶'; break; }
+      var hitFam = false;
+      var ch2 = f2.children || {};
+      for (var cid2 in ch2) { if (String(ptBare(ch2[cid2].name) || '') === nm) { famTag = fl2 + '子女'; hitFam = true; break; } }
+      if (hitFam) break;
+    }
+    lines.push('【你自己（' + nm + '）】身份:' + (ptBare(c.group) || '?') + (famTag ? '（' + famTag + '）' : '') + '；对玩家的态度:' + (ptBare(c.attitude) || '观望') +
       '；关系:' + (ptBare(c.relationship) || 0) + '/100；你想要:' + (ptBare(c.wants) || '—') + '；你能办:' + (ptBare(c.can_provide) || '—'));
   } else {
     var famLine = '';
