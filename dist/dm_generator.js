@@ -885,6 +885,9 @@ async function ptOnFloorLog() {
     if (_lastFloorSeen < 0 && sb._lastLogFloor != null) _lastFloorSeen = sb._lastLogFloor;  // 刷新后从聊天级恢复
     if (curFloor === _lastFloorSeen) return;               // 同楼重放（生成结束/全局脚本/编辑都会再触发）→ 跳过
     _lastFloorSeen = curFloor;
+    // v0.3.11：写点前移（fire-and-forget 过串行闸）——下方待复信/积压超限/未配API几条提前return
+    // 也要记楼，否则刷新后恢复不到楼号，同楼重放多跑一遍（Bug H 遗留项）
+    ptUpdate(function (v) { if (v.pt) v.pt._lastLogFloor = curFloor; return v; });
   }
   ptStoryScan(false);                                      // v0.3.5：正文出场人物自动入列（建会话不需要 API）
   var cfg = ptApiCfg();
