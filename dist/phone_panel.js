@@ -337,27 +337,44 @@
     var v = ptRead();
     var npcs = (v.pt && v.pt.npcs) || {};
     var sd = ptStatData() || {};
-    // v0.3.12：分组——「剧情与人脉」（账本联系人/家庭成员/正文登场者）在上，「其他」（探路生面孔）沉底
-    var known = {}, other = [];
-    Object.keys(npcs).forEach(function (id) {
-      var isKnown = !!(sd.contacts && sd.contacts[id]) || !!(sd.families && sd.families[id]) || npcs[id].source === 'story';
-      (isKnown ? known : other)[id] = true;   // known 作集合，other 保序
-    });
-    var otherIds = Object.keys(npcs).filter(function (id) { return !known[id]; });
-    var sortTs = function (a, b) { return (npcs[b].last_ts || 0) - (npcs[a].last_ts || 0); };
-    var ids = Object.keys(known).sort(sortTs).concat(otherIds.sort(sortTs));
     var ob = loadOutbox();
     var obCount = outboxCount();
     var banner = '';
     if (obCount > 0) {
       banner = '<div id="piaotiao-sendall" class="pt-banner"><span class="n">' + obCount + '</span><span class="t">📨 确定发送，等他们回复</span></div>';
     }
+    // v0.3.13：①从无往来的空会话不进微信列表（人脉留在「联系人」页，谁真来过消息谁才出现）；
+    // ②认识与否按人名对账本判定——微信会话 id 是人名、账本键是拼音 id，旧逻辑 sd.contacts[id]
+    //   永远查不中，导致雷万钧/陈国邦等账本联系人全掉进陌生人组、只剩 story 源的家人占上组。
+    var contactNames = {}, famNames = {};
+    for (var ck in (sd.contacts || {})) {
+      var cn = String(ptBare((sd.contacts[ck] || {}).name) || '').trim();
+      if (cn) contactNames[cn] = true;
+    }
+    for (var fk in (sd.families || {})) {
+      var f = sd.families[fk];
+      var members = [f.head, f.spouse];
+      for (var mi = 0; mi < members.length; mi++) { var mn = members[mi] && ptBare(members[mi].name); if (mn) famNames[String(mn).trim()] = true; }
+      var chd = f.children || {};
+      for (var ckk in chd) { var n3 = ptBare(chd[ckk].name); if (n3) famNames[String(n3).trim()] = true; }
+    }
+    var knownIds = [], strangerIds = [];
+    Object.keys(npcs).forEach(function (id) {
+      var npc = npcs[id];
+      var hasMsg = (npc.dm_history && npc.dm_history.length > 0) || ((ob[id] || []).length > 0);
+      if (!hasMsg) return;
+      var nm = String(npc.name || id).trim();
+      (contactNames[nm] || famNames[nm] || npc.source === 'story' ? knownIds : strangerIds).push(id);
+    });
+    var sortTs = function (a, b) { return (npcs[b].last_ts || 0) - (npcs[a].last_ts || 0); };
+    knownIds.sort(sortTs);
+    strangerIds.sort(sortTs);
     function rowHtml(id) {
       var npc = npcs[id];
       var name = convName(sd, id);
       var unread = npc.unread || 0;
       var queued = (ob[id] || []).length;
-      var isFam = !!(sd.families && sd.families[id]);
+      var isFam = famNames[String(npc.name || id).trim()];
       return '<div data-conv="' + esc(id) + '" class="pt-row">' +
         '<span class="pt-ava' + (isFam ? ' family' : '') + '">' + esc(String(name).slice(0, 1)) + '</span>' +
         '<span class="pt-mid"><span class="pt-name"><span>' + esc(name) + (npc.archetype ? ' <span style="font-size:10px;color:var(--dim);">' + esc(npc.archetype) + '</span>' : '') + '</span>' +
@@ -366,10 +383,10 @@
         (unread > 0 ? '<span class="pt-unread">' + unread + '</span>' : '') +
         '</span></div>';
     }
-    var rows = Object.keys(known).sort(sortTs).map(rowHtml).join('');
-    if (otherIds.length) {
-      rows += '<div style="padding:6px 14px 4px;font-size:11px;color:var(--dim);background:' + C.bg + ';">—— 主动寻上门 ——</div>' +
-        otherIds.sort(sortTs).map(rowHtml).join('');
+    var rows = knownIds.map(rowHtml).join('');
+    if (strangerIds.length) {
+      rows += '<div style="padding:6px 14px 4px;font-size:11px;color:var(--dim);background:' + C.bg + ';">—— 陌生人（不在联系人里） ——</div>' +
+        strangerIds.map(rowHtml).join('');
     }
     return banner + '<div style="background:' + C.bg + ';">' + (rows || '<div style="padding:24px;color:var(--dim);text-align:center;font-size:13px;">暂无会话<br><span style="font-size:12px;">剧情里的微信往来会出现在这里</span></div>') + '</div>';
   }
@@ -412,6 +429,14 @@
 
   // ── 会话线程 ──
   function openConv(id) {
+    // v0.3.13：联系人页传的是账本键（拼音 id），微信会话键是人名——折回一致，否则线程恒空
+    try {
+      var npcs0 = ((ptRead() || {}).pt || {}).npcs || {};
+      if (!npcs0[id]) {
+        var nm0 = convName(null, id);
+        if (nm0 && npcs0[nm0]) id = nm0;
+      }
+    } catch (e0) {}
     currentConv = id;
     currentView = 'wechat';
     ptUpdate(function (v) {

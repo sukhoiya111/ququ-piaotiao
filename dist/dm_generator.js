@@ -61,6 +61,7 @@ var PT_VOICES = {
   '蔡满仓': '蔡满仓，58岁，「金满堂」商K老板，信息贩子，人称老蔡。贫豪×重情（危险），手腕上佛珠金表各一。什么都用酒局谈，口头禅"小事小事"。私信热络得像老友，爱发语音，三句不离"有个好玩的事"，情报真假九真一假。',
   '方岚': '方岚，41岁，市审计系统专项处副处长，人称方检。精确×谨慎，短发，全身上下没有一件衣服在讲故事。不收礼、不吃饭、不给面子任何进度条，但讲规则：规则内可以慢，可以"再核一遍"。私信极简，一句是一句，从不寒暄，回复慢但准。',
   '雷万钧': '雷万钧，46岁，城投片区开发公司副总经理，人称雷哥。{{user}} 圈里的狐朋狗友、带局人——不求助不结仇不图什么，纯为「玩」而来。说话短、糙、直接，带钩子："周五云顶，给你留了个人""这局你不去亏大了"。私信从不谈业务，业务在酒桌上谈；约局从不解释理由，只给时间地点。',
+  '阮棠': '阮棠，21岁，S市艺术学院舞蹈系大四，现代舞方向，专业第一。瞒着母亲求留学路子——英国老师的试训邀请月底截止，她付不起中介钱，上周三来过一次留下材料。清纯怯生，说话轻、爱道歉、句尾带「那个」；但一说到「出去」，眼睛会亮，话会突然变密。私信客气到局促，从不开口谈钱，被逼急了只会说「我可以等」——其实等不起。她管「帮忙」叫「麻烦您」，管「谢礼」叫「我还」。',
 };
 
 // ── 世界书素材直读（单一真源：改条目=私信同步生效） ──
@@ -196,7 +197,12 @@ function ptDescribeStateFor(sb, id) {
   if (uid.name) lines.push('玩家名字: ' + uid.name);
   if (uid.persona) lines.push('玩家的人设（唯一可信设定）:\n' + uid.persona.slice(0, 600));
   var nm = (sb && sb.npcs && sb.npcs[id] && sb.npcs[id].name) || ptIdToName(sb, id);
-  var c = sd.contacts && sd.contacts[id];
+  // v0.3.13：会话 id=人名，账本键=拼音 id——必须按名字折回，否则联系人的账本行从不上车
+  var c = null;
+  if (sd.contacts) {
+    if (sd.contacts[id]) c = sd.contacts[id];
+    else for (var ck in sd.contacts) { if (String(ptBare(sd.contacts[ck].name) || '').trim() === nm) { c = sd.contacts[ck]; break; } }
+  }
   if (c) {
     lines.push('【你自己（' + nm + '）】身份:' + (ptBare(c.group) || '?') + '；对玩家的态度:' + (ptBare(c.attitude) || '观望') +
       '；关系:' + (ptBare(c.relationship) || 0) + '/100；你想要:' + (ptBare(c.wants) || '—') + '；你能办:' + (ptBare(c.can_provide) || '—'));
@@ -308,7 +314,7 @@ function ptMergeFrags(v) { // 合并同名碎片（历史键混用过 family id/
     var ids = groups[key2];
     if (ids.length < 2 && ids[0] === key2) continue;
     ids.sort(function (a, b) { return (npcs[a].last_ts || 0) - (npcs[b].last_ts || 0); });
-    var merged = { name: key2, unread: 0, dm_history: [], last_ts: 0, last_message: '', muted: false, archetype: '' };
+    var merged = { name: key2, unread: 0, dm_history: [], last_ts: 0, last_message: '', muted: false, archetype: '', tagline: '', source: '' };
     for (var i2 = 0; i2 < ids.length; i2++) {
       var n2 = npcs[ids[i2]];
       merged.dm_history = merged.dm_history.concat(n2.dm_history || []);
@@ -316,6 +322,8 @@ function ptMergeFrags(v) { // 合并同名碎片（历史键混用过 family id/
       if ((n2.last_ts || 0) > merged.last_ts) { merged.last_ts = n2.last_ts; merged.last_message = n2.last_message; }
       merged.muted = merged.muted || !!n2.muted;
       merged.archetype = merged.archetype || n2.archetype || '';
+      merged.tagline = merged.tagline || n2.tagline || '';
+      merged.source = merged.source || n2.source || '';
     }
     merged.dm_history.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
     if (merged.dm_history.length > 400) merged.dm_history = merged.dm_history.slice(-400);
@@ -420,7 +428,8 @@ async function ptBuildPrompt(sb, plot, n, reason, strict) {
     '【开口要五花八门】不只"在吗"——有的直接递话（「有个事，电话里说不方便」）、有的试探口风（「最近上面查得严啊」）、有的求办事、有的送消息当投名状、有的来还人情。开口方式本身就是这个人的名片。\n\n' +
     '【人设边界·铁律】每个 NPC 只知道自己那条线；「你知道但他们不知道的」绝不出现在私信里。\n' +
     '【在场铁律】别的角色在剧情里做了什么——只有正文里出现TA名字或 User 告诉过TA，TA才知道；否则只能像局外人那样问「最近怎么样」。\n' +
-    '【信息隔离·铁律】谁都看不到 User 的手机和账本——不知道他的余额、他还在跟谁聊、别人的把柄强度。⛔ 不许说"听说你还有别的客户""你上周替谁办的"。各自只知道：自己和他说过的话、他当面做的事、自己亲眼看见的。\n\n' +
+    '【信息隔离·铁律】谁都看不到 User 的手机和账本——不知道他的余额、他还在跟谁聊、别人的把柄强度。⛔ 不许说"听说你还有别的客户""你上周替谁办的"。各自只知道：自己和他说过的话、他当面做的事、自己亲眼看见的。\n' +
+    '【记忆边界·铁律】每个人跟 User 之间只存在真实发生过的事（正文里 TA 在场的部分＋各自的历史私信）。陌生人是第一次给 User 发消息，没有任何"上次/之前"的交情——⛔ 严禁虚构"上次提过""上周托你"这类没发生过的共同记忆。\n\n' +
     '【User侧动作】他可能：发语音[voice]（对方听到的是内容和语气）；发图片[image]（材料照片/收据截图，按画面理解）；转账[transfer]（打点/预付——体制内的人对钱都敏感，收得矜持或干脆不接，绝不当场道谢收到甜甜）；撤回[recall]（TA只知道他撤回了，永远看不到内容——追问还是装大度，按人设）。每一样都要有反应，别当没发生。\n' +
     '【平台设定·铁律】这是私人工作微信：敢谈事、敢谈价、敢谈人，但绝不留下字据——能当面说的绝不打字，打了字的也是暗语（「那个东西」「上次的数」「老地方」）。体制内的人句句设防是本能：不写全名、不写学校、不写金额精确数。\n' + PT_FORMAT_RULES + '\n';
   var ordered = [
@@ -475,7 +484,8 @@ async function ptBuildPromptFor(sb, id, n, reason, strict) {
     '你是「批条」模拟器里"手机私信"的生成器。背景：User 是 S 市的地下掮客，专为有权有钱的家庭解决「棘手问题」（名校名额/艺术留学/签证移民）。任务：生成 NPC「' + nm + '」发给 User 的微信私信。本轮只允许 ' + nm + ' 一个人发消息。\n\n' +
     '【文风铁律】冷冰冰的礼貌，客气但暗藏内容；威胁用请托句式；陈述句，不用感叹号；1-3 句一条，像真的体制内微信。话不说满、事不落纸、钱不过账面。\n\n' +
     '【人设边界·铁律】' + nm + ' 只知道自己那条线（见下方"你自己"与"在场的楼"）。TA 不知道：玩家心里想什么、别的角色私下做了什么、玩家的钱和账本、别的会话内容。\n' +
-    '【在场铁律】"在场的楼"是 TA 名字出现过的正文——那是 TA 亲眼见过/亲耳听过的。没出现 TA 的楼层，TA 一概不知，只能像局外人那样问「最近怎么样」。\n' +
+    '【在场铁律】"在场的楼"是 TA 名字出现过的正文——那是 TA 亲眼见过/亲耳听过的。没出现 TA 的楼层，TA 一概不知，只能像局外人那样问「最近怎么样」。注意：楼里可能同时写着别人的事——其他人物在办的业务（材料/名额/案子/家事）与 TA 无关，TA 不知道，也绝不能把别人的事当成自己跟玩家之间的事来说。\n' +
+    '【记忆边界·铁律】TA 与玩家之间只存在两样东西：①下方【历史私信】里真实列出的消息；②【在场的楼】里的正文。除此之外你们没有任何共同经历——⛔ 严禁虚构"上次/上周/之前/那天托你"等共同记忆，严禁提任何历史私信里没有的事。历史私信为空或只有一条，就当是刚开口。玩家问「什么？/你说什么？」时，说明你说的事他并不知道——立刻放下那个话头，按你真正想办的事重新开口，绝不能编造更早的往来来自圆其说。\n' +
     '【信息隔离·铁律】TA 看不到玩家的手机和账本。⛔ 不许说"听说你还有别的客户""你上周替谁办的"。\n' +
     '【User侧动作】他可能：发语音[voice]；发图片[image]；转账[transfer]；撤回[recall]（TA 只知道他撤回了，看不到内容）。每一样都要有反应。\n' +
     '【平台设定·铁律】私人工作微信：敢谈事敢谈价，但绝不留字据——能当面说的绝不打字，打了字的也是暗语。\n' + PT_FORMAT_RULES + '\n';
@@ -483,6 +493,13 @@ async function ptBuildPromptFor(sb, id, n, reason, strict) {
     { role: 'system', content: sys1 },
     { role: 'system', content: ptDescribeStateFor(sb, id) },
   ];
+  // v0.3.13：单人通道补声音卡＋完整档案——此前单人提示词缺人设素材，模型只能自己编（胡诌记忆的根因之一）
+  if (PT_VOICES[nm]) ordered.push({ role: 'system', content: '【你的说话方式（必须贴合）】' + PT_VOICES[nm] });
+  var wbKey = PT_WB_KEY[nm];
+  if (wbKey) {
+    var dossier = await ptWbContent(wbKey, '');
+    if (dossier) ordered.push({ role: 'system', content: '【你的完整档案（言行必须贴合这份人设）】\n' + String(dossier).slice(0, 3000) });
+  }
   var win = await ptPlotFor(nm);
   if (win) ordered.push({ role: 'system', content: '【你在场的楼（只有这些你知道，别复述）】\n' + win });
   ordered.push({ role: 'system', content: ptOwnHistory(sb, id) });
@@ -853,7 +870,8 @@ function ptEventTick() {
   try {
     var evtMeta = (ptRead().pt && ptRead().pt._evt) || { turns: 0, last: -99, lastNpc: '', cd: {} };
     var turns = (evtMeta.turns || 0) + 1;
-    var passGate = (turns - (evtMeta.last != null ? evtMeta.last : -99)) >= EVT_MINGAP;
+    // v0.3.13：开局前 EVT_MINGAP 楼不跑事件——种子私信刚落地马上又主动来信=打扰，还容易编故事
+    var passGate = turns >= EVT_MINGAP && (turns - (evtMeta.last != null ? evtMeta.last : -99)) >= EVT_MINGAP;
     ptUpdate(function (v) {
       if (!v.pt) return v;
       v.pt._evt = v.pt._evt || { turns: 0, last: -99, lastNpc: '', cd: {} };
@@ -872,6 +890,7 @@ function ptEventTick() {
           if (m && es[i].enabled !== false && !seen[m[1]]) { seen[m[1]] = true; candidates.push(m[1]); }
         }
         var npcs = (ptRead().pt && ptRead().pt.npcs) || {};
+        var waitingN = ptWaitingMap(ptRead().pt || {});   // v0.3.13：上一条还没被回的人不主动追发
         for (var k in npcs) { var nn = String(npcs[k] && npcs[k].name || k); if (!seen[nn]) { seen[nn] = true; candidates.push(nn); } }
         // 排除：当前在场的（已在剧情里，不需要登场事件）、上一事件同一人、冷却中的
         var plot = await ptRecentPlot();
@@ -879,6 +898,7 @@ function ptEventTick() {
         candidates = candidates.filter(function (n) {
           if (inScene.indexOf(n) !== -1) return false;
           if (n === evtMeta.lastNpc) return false;
+          if (waitingN[ptCanon(n)]) return false;              // v0.3.13：待复信不追发
           var cd = evtMeta.cd || {};
           if (cd[n] != null && turns - cd[n] < EVT_NPC_COOLDOWN) return false;
           if (!ptProOk(ptCanon(n))) return false;             // v0.3.12：单人主动冷却
@@ -1213,6 +1233,7 @@ async function ensureSeed() {
         '蔡满仓': '商K·信息贩子',
         '方岚': '审计·讲规则',
         '雷万钧': '城投副总·带局玩伴',
+        '阮棠': '舞蹈生·瞒母求留学',
       };
       for (var sk in seedArchetypes) {
         var sn = ptEnsureNpc(v, sk, sk);
@@ -1226,6 +1247,14 @@ async function ensureSeed() {
         npcLei.unread = 1;
         npcLei.last_ts = Date.now();
         npcLei.last_message = '周五晚云顶会，我存酒的舱。给你留了个…';
+      }
+      // 开局种子第三条：阮棠的留学委托追问（核心玩法开局入口——她在等答复，幂等）
+      var npcRt = ptEnsureNpc(v, '阮棠', '阮棠');
+      if (!npcRt.dm_history.length) {
+        npcRt.dm_history.push({ sender: 'THEM', time: ptNow(), ts: Date.now(), type: 'text', content: '打扰您了……我是上周三来过的阮棠，舞蹈学院那个事。材料我都带全了，您随时叫我来补。您要是为难，就当我没发过这条——可英国那位老师的邀请，月底就截止了。' });
+        npcRt.unread = 1;
+        npcRt.last_ts = Date.now();
+        npcRt.last_message = '打扰您了……我是上周三来过的阮棠…';
       }
       return v;
     });
