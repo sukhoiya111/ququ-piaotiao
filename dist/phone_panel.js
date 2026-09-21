@@ -423,6 +423,15 @@
     var typing = _typing ? '<div class="pt-typing">' + esc(name) + ' 正在输入…</div>' : '';
     var ob = loadOutbox();
     var queued = (ob[currentConv] || []).length;
+    // v0.3.11：待发消息（发件箱）即时显示在消息流尾部——入队即可见，不等批量发送成功
+    var obMsgs = ob[currentConv] || [];
+    if (obMsgs.length) {
+      var obDay = dayKey();
+      if (obDay !== lastDay) items.push('<div class="pt-divider">' + esc(obDay) + '</div>');
+      for (var oi = 0; oi < obMsgs.length; oi++) {
+        items.push('<div class="pt-msg mine"><span class="pt-bub" style="opacity:.72;">' + esc(String(obMsgs[oi])) + '</span><span class="pt-tail">✍️ 待发</span></div>');
+      }
+    }
     var QUICK = ['这事包在我身上。', '今晚见个面，细说。', '我尽量办。', '我会留意。', '老规矩。', '事情有进展，电话里不便说。'];
     return '<div class="pt-chat">' +
       '<div class="pt-chat-head" id="piaotiao-back"><span style="color:var(--dim);font-size:16px;">‹</span>' +

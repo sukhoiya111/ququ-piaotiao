@@ -974,7 +974,9 @@ async function pumpRequests() {
         });
       }
       try { await ptRunOnce(merged); } catch (e) {
-        console.warn(PT_TAG, '本轮私信生成静默跳过：', e && (e.message || e));
+        console.warn(PT_TAG, '本轮私信生成失败：', e && (e.message || e));
+        // v0.3.11：失败必须出声（军规2）——玩家消息此时已入账，报错要说清"消息没丢、是回复没生成"
+        ptNotify('error', '私信发送失败：' + ((e && (e.message || e)) || '未知错误') + '。你的消息已入账，但对方这次没能回复——检查设置里的 API，或稍后再发一条。');
       }
       try { eventEmit('pt_updated'); } catch (e) {}
     }
@@ -1021,10 +1023,11 @@ async function ensureSeed() {
       v.pt._seeded = true;
       var npc0 = ptEnsureNpc(v, '陈国邦', '陈国邦');
       if (!npc0.dm_history.length) {
-        npc0.dm_history.push({ sender: 'THEM', time: ptNow(), ts: Date.now(), type: 'text', content: '王厅长那边提到您了。材料我让小陈再整理一份全的，您过目之后，咱们约个只有你我两个人的时间地点细谈。' });
+        // v0.3.11：文案对齐 first_mes——开局正文里陈国邦已登门交割材料，私信必须是他"走后补发"的口吻（不能再是事前约时间）
+        npc0.dm_history.push({ sender: 'THEM', time: ptNow(), ts: Date.now(), type: 'text', content: '刚到楼下，不多坐了。材料您先过目，小陈那边还压着份更全的，随后补上。孩子的事，全凭您安排。王厅长那头一有动静，我第一时间报您。' });
         npc0.unread = 1;
         npc0.last_ts = Date.now();
-        npc0.last_message = '王厅长那边提到您了。材料我让小陈再整…';
+        npc0.last_message = '刚到楼下，不多坐了。材料您先过目…';
       }
       // 预建固定联系人的空会话（让玩家开局就能在微信列表和联系人页看到人脉）
       var seedArchetypes = {
