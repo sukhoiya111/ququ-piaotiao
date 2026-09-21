@@ -580,13 +580,31 @@ async function ptGenerateOnce(sb, plot, n, reason, strict) {
   return parsed;
 }
 // v0.3.12：按已构建的单人提示词直接调用
-async function ptCallBuilt(built) {
+// v0.3.14：targetId 传入时做归属校正——单人行提示词已保证"本轮只允许 X 一个人发消息"，
+// 模型把名字写歪（真机：雷万钧 被写成拼音 leijun）也不许劈出新会话，一律归到目标本人。
+// 多说话人的陌生人/自由轮走 ptGenerateOnce，不经此处，行为不变。
+async function ptCallBuilt(built, targetId) {
   var cfg = ptApiCfg();
   if (!cfg) { throw new Error('NO_API'); }
   await ptWaitSlot();
   var raw = await ptCallApi(cfg, built.ordered, built.instr);
   _lastRaw = typeof raw === 'string' ? raw : (raw && raw.content) || '';
-  return ptParseDMs(_lastRaw);
+  var rows = ptParseDMs(_lastRaw);
+  if (targetId) rows = ptAttributeTo(rows, (ptRead().pt || {}), targetId);
+  return rows;
+}
+// 单人行归属校正：把所有行的名字统一改写为目标本人的显示名（模型写歪/写别名/写空都收口于此）。
+// 依据：单人行提示词只放行一个说话人，覆盖是安全且幂等的；旧行为是过滤掉（回信丢失）或
+// 按模型给的名字建新会话（会话劈裂），两者都劣于此。
+function ptAttributeTo(rows, sb, targetId) {
+  var nm = ptIdToName(sb, targetId);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].name || '').trim() !== nm) {
+      console.info(PT_TAG, '单人行归属校正：' + (rows[i].name || '(空)') + ' → ' + targetId);
+    }
+    rows[i].name = nm;
+  }
+  return rows;
 }
 
 // ── 主流程（请求排队 + 合并，绝不丢单） ──
@@ -616,17 +634,17 @@ async function ptRunOnce(req) {
       for (var ci = 0; ci < convIds.length; ci++) {
         try {
           var b2 = await ptBuildPromptFor(sb, convIds[ci], '1-2', req.reason || '玩家刚在微信里回复了你', false);
-          all = all.concat(await ptCallBuilt(b2));
+          all = all.concat(await ptCallBuilt(b2, convIds[ci]));   // v0.3.14：回信归属到该会话本人
         } catch (eC) { console.warn(PT_TAG, '回信单人调用失败', convIds[ci], eC); }
       }
     } else if (Array.isArray(req.focus) && req.focus.length) {
       var fids = req.focus.slice(0, 2);
       for (var fi = 0; fi < fids.length; fi++) {
         try {
-          var b1 = await ptBuildPromptFor(sb, fids[fi], req.n, req.reason, false);
-          var r1 = await ptCallBuilt(b1);
           var fid = fids[fi];
-          all = all.concat(r1.filter(function (r) { return ptCanon(r.name) === fid; }));
+          var b1 = await ptBuildPromptFor(sb, fid, req.n, req.reason, false);
+          var r1 = await ptCallBuilt(b1, fid);
+          all = all.concat(r1);   // v0.3.14：归属校正已在 ptCallBuilt 内完成，不再按名过滤（旧行为会丢回信）
         } catch (eF) { console.warn(PT_TAG, '单人调用失败', fids[fi], eF); }
       }
     } else {
@@ -654,13 +672,13 @@ async function ptRunOnce(req) {
         var convIds2 = Object.keys(req.linesByConv).slice(0, 4);
         for (var c2i = 0; c2i < convIds2.length; c2i++) {
           var b3 = await ptBuildPromptFor(sb, convIds2[c2i], '1-2', req.reason || '玩家刚在微信里回复了你', true);
-          all = all.concat(await ptCallBuilt(b3));
+          all = all.concat(await ptCallBuilt(b3, convIds2[c2i]));
         }
       } else if (Array.isArray(req.focus) && req.focus.length) {
         var f2 = req.focus.slice(0, 2);
         for (var f2i = 0; f2i < f2.length; f2i++) {
           var b4 = await ptBuildPromptFor(sb, f2[f2i], req.n, req.reason, true);
-          all = all.concat(await ptCallBuilt(b4));
+          all = all.concat(await ptCallBuilt(b4, f2[f2i]));
         }
       } else {
         var pub2 = await ptPublicPlot();
@@ -688,10 +706,9 @@ async function ptRunOnce(req) {
       for (var mi2 = 0; mi2 < missing.length && mi2 < 2; mi2++) {
         try {
           var b5 = await ptBuildPromptFor(sb, missing[mi2], '1-2', mReason, false);
-          var more = await ptCallBuilt(b5);
+          var more = await ptCallBuilt(b5, missing[mi2]);   // v0.3.14：带归属校正
           for (var mi = 0; mi < more.length; mi++) {
-            var mid = ptCanon(more[mi].name);
-            if (mid === missing[mi2] && more[mi].type !== 'tag') dms.push(more[mi]);
+            if (more[mi].type !== 'tag') dms.push(more[mi]);
           }
         } catch (e3) { /* 单人补漏失败不阻塞 */ }
       }

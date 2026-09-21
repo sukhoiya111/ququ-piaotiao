@@ -375,9 +375,12 @@
       var unread = npc.unread || 0;
       var queued = (ob[id] || []).length;
       var isFam = famNames[String(npc.name || id).trim()];
+      // v0.3.14：身份短句取 archetype 优先、退回 tagline——账本建档渠道的联系人（如陈国邦）
+      // 没有 seedArchetypes 给的 archetype，但引擎的 ptEnsureTaglines 有 tagline，旧写法会空着
+      var rowTag = npc.archetype || npc.tagline || '';
       return '<div data-conv="' + esc(id) + '" class="pt-row">' +
         '<span class="pt-ava' + (isFam ? ' family' : '') + '">' + esc(String(name).slice(0, 1)) + '</span>' +
-        '<span class="pt-mid"><span class="pt-name"><span>' + esc(name) + (npc.archetype ? ' <span style="font-size:10px;color:var(--dim);">' + esc(npc.archetype) + '</span>' : '') + '</span>' +
+        '<span class="pt-mid"><span class="pt-name"><span>' + esc(name) + (rowTag ? ' <span style="font-size:10px;color:var(--dim);">' + esc(rowTag) + '</span>' : '') + '</span>' +
         '<span class="pt-time">' + (npc.dm_history && npc.dm_history.length ? esc((npc.dm_history[npc.dm_history.length - 1] || {}).time || '') : '') + '</span></span>' +
         '<span class="pt-prev">' + (queued > 0 ? '<span style="color:var(--blue);">✍️ 待发' + queued + '条 </span>' : '') + esc(npc.last_message || '') + '</span>' +
         (unread > 0 ? '<span class="pt-unread">' + unread + '</span>' : '') +
