@@ -153,6 +153,85 @@ function ptInScene(plot) {
   return hits;
 }
 
+// ── v0.3.12：信息隔离工具（治"人人全知"，2026-09-21 用户反馈） ──
+// 单人主动冷却：该 NPC 被引擎主动私信后 PRO_GAP 楼内，任何主动来源不再点名 TA（玩家回信豁免）
+function ptProOk(id) {
+  try {
+    var n = (ptRead().pt && ptRead().pt.npcs) ? ptRead().pt.npcs[id] : null;
+    if (!n) return true;
+    return (ptFloorNo() - (n._lastPro || -99)) >= PRO_GAP;
+  } catch (e) { return true; }
+}
+// 单人正文窗口：只给"TA 在场的楼"——TA 名字出现在哪楼，才看得见哪楼的正文；
+// 不在场的楼一律看不到（包括玩家的内心独白）。这是硬过滤，不再靠提示词自觉。
+async function ptPlotFor(name) {
+  try {
+    var arr = await getChatMessages('0-{{lastMessageId}}');
+    if (!arr || !arr.length) return '';
+    var out = [];
+    for (var i = Math.max(0, arr.length - 6); i < arr.length; i++) {
+      var t = ptCleanProse(arr[i].message);
+      if (!t || t.indexOf(name) === -1) continue;
+      out.push((arr[i].is_user || arr[i].role === 'user' ? '我（玩家对TA说/做）：' : '正文：') + t);
+    }
+    var joined = out.join('\n');
+    return joined.length > 1800 ? joined.slice(-1800) : joined;
+  } catch (e) { return ''; }
+}
+// 公开层正文（陌生人探路用）：陌生人只该知道"场面"——最近一楼的时间地点人物，无内心戏、无账本
+async function ptPublicPlot() {
+  try {
+    var arr = await getChatMessages('0-{{lastMessageId}}');
+    if (!arr || !arr.length) return '';
+    var t = ptCleanProse(arr[arr.length - 1].message) || '';
+    return t.length > 500 ? t.slice(-500) : t;
+  } catch (e) { return ''; }
+}
+// 单人账本视图：只给 TA 自己相关的行——绝不给通讯录全表/资金/在办家庭明细
+function ptDescribeStateFor(sb, id) {
+  var sd = ptStatData() || {};
+  var lines = [];
+  lines.push('【手机时钟】现在是 ' + ptNow());
+  var uid = ptIdentity();
+  if (uid.name) lines.push('玩家名字: ' + uid.name);
+  if (uid.persona) lines.push('玩家的人设（唯一可信设定）:\n' + uid.persona.slice(0, 600));
+  var nm = (sb && sb.npcs && sb.npcs[id] && sb.npcs[id].name) || ptIdToName(sb, id);
+  var c = sd.contacts && sd.contacts[id];
+  if (c) {
+    lines.push('【你自己（' + nm + '）】身份:' + (ptBare(c.group) || '?') + '；对玩家的态度:' + (ptBare(c.attitude) || '观望') +
+      '；关系:' + (ptBare(c.relationship) || 0) + '/100；你想要:' + (ptBare(c.wants) || '—') + '；你能办:' + (ptBare(c.can_provide) || '—'));
+  } else {
+    var famLine = '';
+    var fm = sd.families || {};
+    for (var fid in fm) {
+      var f = fm[fid];
+      var head = f.head || {}, sp = f.spouse || {}, ch = f.children || {};
+      if (String(ptBare(head.name) || '') === nm) { famLine = '你是' + (ptBare(f.name) || fid) + '家一家之主；关系:' + (ptBare(head.relationship) || 0) + '/100；你在为家里的事奔走'; break; }
+      if (String(ptBare(sp.name) || '') === nm) { famLine = '你是' + (ptBare(f.name) || fid) + '家主配偶；你对丈夫在办的事：' + ((Number(ptBare(sp.complicity)) || 0) > 50 ? '知情' : '基本不知情'); break; }
+      var hit = false;
+      for (var cid in ch) { if (String(ptBare(ch[cid].name) || '') === nm) { famLine = '你是' + (ptBare(f.name) || fid) + '家孩子；立场:' + (ptBare(ch[cid].stance) || '疏离'); hit = true; break; } }
+      if (hit) break;
+    }
+    if (famLine) lines.push('【你自己】' + famLine);
+    else if (sb && sb.npcs && sb.npcs[id]) {
+      var n = sb.npcs[id];
+      lines.push('【你自己】' + nm + (n.archetype ? '（' + n.archetype + '）' : '') + (n.tagline ? '；' + n.tagline : '；主动寻上门的生面孔'));
+    }
+  }
+  return lines.join('\n');
+}
+// 各人自己的历史私信（防复读、防出戏第三人称）——只带 TA 自己那一线
+function ptOwnHistory(sb, id) {
+  var n = sb && sb.npcs && sb.npcs[id];
+  var h = (n && n.dm_history) || [];
+  if (!h.length) return '【你与玩家的历史私信】（无——你还没跟他通过消息）';
+  var lines = h.slice(-6).map(function (m) {
+    var who = m.sender === 'ME' ? '玩家' : '你';
+    return who + '(' + m.type + '): ' + String(m.content || '').slice(0, 120);
+  });
+  return '【你与玩家的历史私信（你只记得这些）】\n' + lines.join('\n');
+}
+
 // ── 独立 API（唯一生成通道；配置存 parent localStorage，不进聊天文件） ──
 function ptApiCfg() {
   try {
@@ -389,6 +468,29 @@ async function ptBuildPrompt(sb, plot, n, reason, strict) {
   return { ordered: ordered, instr: instr, soloLock: soloLock };
 }
 
+// ── v0.3.12：单人提示词（点名私信走这里——按人裁剪正文窗口/账本/历史，治全知） ──
+async function ptBuildPromptFor(sb, id, n, reason, strict) {
+  var nm = (sb && sb.npcs && sb.npcs[id] && sb.npcs[id].name) || ptIdToName(sb, id);
+  var sys1 =
+    '你是「批条」模拟器里"手机私信"的生成器。背景：User 是 S 市的地下掮客，专为有权有钱的家庭解决「棘手问题」（名校名额/艺术留学/签证移民）。任务：生成 NPC「' + nm + '」发给 User 的微信私信。本轮只允许 ' + nm + ' 一个人发消息。\n\n' +
+    '【文风铁律】冷冰冰的礼貌，客气但暗藏内容；威胁用请托句式；陈述句，不用感叹号；1-3 句一条，像真的体制内微信。话不说满、事不落纸、钱不过账面。\n\n' +
+    '【人设边界·铁律】' + nm + ' 只知道自己那条线（见下方"你自己"与"在场的楼"）。TA 不知道：玩家心里想什么、别的角色私下做了什么、玩家的钱和账本、别的会话内容。\n' +
+    '【在场铁律】"在场的楼"是 TA 名字出现过的正文——那是 TA 亲眼见过/亲耳听过的。没出现 TA 的楼层，TA 一概不知，只能像局外人那样问「最近怎么样」。\n' +
+    '【信息隔离·铁律】TA 看不到玩家的手机和账本。⛔ 不许说"听说你还有别的客户""你上周替谁办的"。\n' +
+    '【User侧动作】他可能：发语音[voice]；发图片[image]；转账[transfer]；撤回[recall]（TA 只知道他撤回了，看不到内容）。每一样都要有反应。\n' +
+    '【平台设定·铁律】私人工作微信：敢谈事敢谈价，但绝不留字据——能当面说的绝不打字，打了字的也是暗语。\n' + PT_FORMAT_RULES + '\n';
+  var ordered = [
+    { role: 'system', content: sys1 },
+    { role: 'system', content: ptDescribeStateFor(sb, id) },
+  ];
+  var win = await ptPlotFor(nm);
+  if (win) ordered.push({ role: 'system', content: '【你在场的楼（只有这些你知道，别复述）】\n' + win });
+  ordered.push({ role: 'system', content: ptOwnHistory(sb, id) });
+  var instr = '现在只由 ' + nm + ' 一人发 ' + (n || '1-2') + ' 条新私信' + (reason ? '（情境：' + reason + '）' : '') + '。绝不能出现其他人的名字。每条一行 名字|类型|内容，不要写别的。';
+  if (strict) instr = '【再次强调：只能输出 名字|类型|内容 的行，每条一行，不许有任何其他文字】\n' + instr;
+  return { ordered: ordered, instr: instr, soloLock: true };
+}
+
 // ── 解析：每行 名字|类型|内容 ──
 var PT_VALID_TYPES = ['text', 'voice', 'image', 'transfer', 'recall', 'tag'];
 function ptParseDMs(raw) {
@@ -460,6 +562,15 @@ async function ptGenerateOnce(sb, plot, n, reason, strict) {
   }
   return parsed;
 }
+// v0.3.12：按已构建的单人提示词直接调用
+async function ptCallBuilt(built) {
+  var cfg = ptApiCfg();
+  if (!cfg) { throw new Error('NO_API'); }
+  await ptWaitSlot();
+  var raw = await ptCallApi(cfg, built.ordered, built.instr);
+  _lastRaw = typeof raw === 'string' ? raw : (raw && raw.content) || '';
+  return ptParseDMs(_lastRaw);
+}
 
 // ── 主流程（请求排队 + 合并，绝不丢单） ──
 var _busy = false, _pending = [];
@@ -478,12 +589,41 @@ async function ptRunOnce(req) {
   var vars = ptRead();
   var sb = (vars && vars.pt) ? vars.pt : null;
   if (!sb) { ptNotify('warning', '手机还没初始化，稍后再试'); return; }
-  var plot = await ptRecentPlot();
+  var cfgChk = ptApiCfg();
+  if (!cfgChk) { ptNotify('warning', '未配置独立 API，跳过私信生成'); return; }
   var all = [];
-  try { all = await ptGenerateOnce(sb, plot, req.n, req.reason, false); }
-  catch (e) {
-    if (String(e && e.message) === 'NO_API') { ptNotify('warning', '未配置独立 API，跳过私信生成'); return; }
-    throw e;
+  // v0.3.12：三路分流——①玩家回信（逐会话单人隔离）②点名私信（单人隔离）③陌生人/自由轮（公开层）
+  try {
+    if (req.linesByConv) {
+      var convIds = Object.keys(req.linesByConv).slice(0, 4);
+      for (var ci = 0; ci < convIds.length; ci++) {
+        try {
+          var b2 = await ptBuildPromptFor(sb, convIds[ci], '1-2', req.reason || '玩家刚在微信里回复了你', false);
+          all = all.concat(await ptCallBuilt(b2));
+        } catch (eC) { console.warn(PT_TAG, '回信单人调用失败', convIds[ci], eC); }
+      }
+    } else if (Array.isArray(req.focus) && req.focus.length) {
+      var fids = req.focus.slice(0, 2);
+      for (var fi = 0; fi < fids.length; fi++) {
+        try {
+          var b1 = await ptBuildPromptFor(sb, fids[fi], req.n, req.reason, false);
+          var r1 = await ptCallBuilt(b1);
+          var fid = fids[fi];
+          all = all.concat(r1.filter(function (r) { return ptCanon(r.name) === fid; }));
+        } catch (eF) { console.warn(PT_TAG, '单人调用失败', fids[fi], eF); }
+      }
+    } else {
+      // 陌生人探路/自由轮：只给公开层正文（最近一楼场面），不给全量剧情、不给在办家庭明细
+      var pub = await ptPublicPlot();
+      try { all = await ptGenerateOnce(sb, pub, req.n, req.reason, false); }
+      catch (eS2) {
+        if (String(eS2 && eS2.message) === 'NO_API') { ptNotify('warning', '未配置独立 API，跳过私信生成'); return; }
+        throw eS2;
+      }
+    }
+  } catch (eOuter) {
+    if (String(eOuter && eOuter.message) === 'NO_API') { ptNotify('warning', '未配置独立 API，跳过私信生成'); return; }
+    throw eOuter;
   }
   var dms = [], tags = [];
   for (var i = 0; i < all.length; i++) {
@@ -491,26 +631,52 @@ async function ptRunOnce(req) {
     else dms.push(all[i]);
   }
   if (!dms.length) {
-    try { all = await ptGenerateOnce(sb, plot, req.n, req.reason, true); } catch (e2) { all = []; }
+    // 重试一次（strict 格式强调）——单人/回信路径也走各自的构建器
+    try {
+      if (req.linesByConv) {
+        var convIds2 = Object.keys(req.linesByConv).slice(0, 4);
+        for (var c2i = 0; c2i < convIds2.length; c2i++) {
+          var b3 = await ptBuildPromptFor(sb, convIds2[c2i], '1-2', req.reason || '玩家刚在微信里回复了你', true);
+          all = all.concat(await ptCallBuilt(b3));
+        }
+      } else if (Array.isArray(req.focus) && req.focus.length) {
+        var f2 = req.focus.slice(0, 2);
+        for (var f2i = 0; f2i < f2.length; f2i++) {
+          var b4 = await ptBuildPromptFor(sb, f2[f2i], req.n, req.reason, true);
+          all = all.concat(await ptCallBuilt(b4));
+        }
+      } else {
+        var pub2 = await ptPublicPlot();
+        all = await ptGenerateOnce(sb, pub2, req.n, req.reason, true);
+      }
+    } catch (e2) { all = []; }
     dms = []; tags = [];
     for (var j = 0; j < all.length; j++) {
       if (all[j].type === 'tag') tags.push({ name: all[j].name, label: String(all[j].content).slice(0, 12) });
       else dms.push(all[j]);
     }
   }
+  // v0.3.12：每轮封顶——主动类最多 2 条入库（模型输出再多也砍掉，治"一波+10"）；
+  // 玩家回信轮豁免（多人会话回信必须到）
+  var capN = req.linesByConv ? 6 : 2;
+  if (dms.length > capN) dms = dms.slice(0, capN);
   // 批量发补漏：点名的人里有没回的 → 再补一轮（防一次生成只回前两个）
-  if (Array.isArray(req.focus) && req.focus.length) {
+  if (Array.isArray(req.focus) && req.focus.length && !req.linesByConv) {
     var replied = {};
     for (var ri = 0; ri < dms.length; ri++) replied[ptCanon(dms[ri].name)] = true;
     var missing = req.focus.filter(function (id) { return !replied[id]; });
     if (missing.length && missing.length < req.focus.length) {
       var names = missing.map(function (id) { return ptIdToName(sb, id); });
       var mReason = '补漏：' + names.join('、') + ' 刚才漏了回复，现在必须每人各回 1-2 条，一个不能少。只让这几个人回应，别人不要出现、不要引入陌生人。';
-      var more = [];
-      try { more = await ptGenerateOnce(sb, plot, String(missing.length) + '-2', mReason, false); } catch (e3) { more = []; }
-      for (var mi = 0; mi < more.length; mi++) {
-        var mid = ptCanon(more[mi].name);
-        if (missing.indexOf(mid) !== -1 && more[mi].type !== 'tag') dms.push(more[mi]);
+      for (var mi2 = 0; mi2 < missing.length && mi2 < 2; mi2++) {
+        try {
+          var b5 = await ptBuildPromptFor(sb, missing[mi2], '1-2', mReason, false);
+          var more = await ptCallBuilt(b5);
+          for (var mi = 0; mi < more.length; mi++) {
+            var mid = ptCanon(more[mi].name);
+            if (mid === missing[mi2] && more[mi].type !== 'tag') dms.push(more[mi]);
+          }
+        } catch (e3) { /* 单人补漏失败不阻塞 */ }
       }
     }
   }
@@ -520,6 +686,7 @@ async function ptRunOnce(req) {
     return;
   }
   // 写回（串行闸内整树改）
+  var proFloor = ptFloorNo();
   await ptUpdate(function (v) {
     if (!v.pt) v.pt = { npcs: {}, _outbox: {} };
     for (var di = 0; di < dms.length; di++) {
@@ -533,6 +700,8 @@ async function ptRunOnce(req) {
       // 玩家本轮点名要回的人（focus）豁免：回信必须到
       if (exN && (exN.unread || 0) >= 3 && !(req.focus && req.focus.indexOf(id) !== -1)) continue;
       ptPushThem(v, id, nm, row.type, row.content);
+      // v0.3.12：记主动冷却写点（回信轮不算主动）
+      if (!req.linesByConv && v.pt.npcs[id]) v.pt.npcs[id]._lastPro = proFloor;
     }
     for (var ti = 0; ti < tags.length; ti++) {
       var tid = ptCanon(tags[ti].name);
@@ -599,15 +768,16 @@ function ptOnPlayerReply(payload) {
     linesByConv: payload && payload.linesByConv,
   }, true);
 }
-var AUTO_STRANGER_CHANCE = 0.25, AUTO_STRANGER_MINGAP = 3, AUTO_STRANGER_MAXPENDING = 4;
-// ── v0.3.9：节奏控制（不让玩家"回不完消息"） ──
+var AUTO_STRANGER_CHANCE = 0.06, AUTO_STRANGER_MINGAP = 10, AUTO_STRANGER_MAXPENDING = 3;
+// ── v0.3.12：节奏降频（2026-09-21 用户反馈"太频繁、发信人繁多"） ──
 // BACKLOG_MAX：全账号未读总数上限——超过后所有"主动私信"（剧情/事件/陌生人/保底）暂停入队，
 // 玩家自己发的回信请求（urgent）不受限；读完/回掉几条后自动恢复。
 // QUIET_TRIGGER：连续 N 次楼层调度完全没有产生任何事件（私信/登门/偶遇都没有）→ 保底轮
-// 随机抽一个"可能有需求"的 NPC 主动发 1 条。≈两个玩家回合（玩家楼+AI楼各计一次）。
-var BACKLOG_MAX = 5, QUIET_TRIGGER = 4, _quietStreak = 0;
+// 随机抽一个"可能有需求"的 NPC 主动发 1 条。
+// PRO_GAP：单人主动冷却——任何人被引擎主动私信后，10 楼内不再被任何主动来源点名（回信豁免）。
+var BACKLOG_MAX = 3, QUIET_TRIGGER = 6, _quietStreak = 0, PRO_GAP = 10;
 // ── v0.3.5：剧情成员同步（正文出场人物自动入列 + 察觉变化触发剧情私信） ──
-var STORY_DM_CHANCE = 0.35, STORY_DM_COOLDOWN = 8;
+var STORY_DM_CHANCE = 0.12, STORY_DM_COOLDOWN = 8;
 function ptFloorNo() { try { return (parent.SillyTavern && parent.SillyTavern.getContext().chat.length) || 0; } catch (e) { return 0; } }
 function ptStoryCast(sd) {
   var cast = {};
@@ -662,7 +832,7 @@ function ptStoryScan(allowDm) {
         var risen = aw > (st.aware || 0) && (floorNow - (st.floor || -99)) >= STORY_DM_COOLDOWN;
         if (isNew || risen) {
           npc2._story = { floor: floorNow, aware: aw };
-          if (Math.random() < STORY_DM_CHANCE) toAsk.push(info2);
+          if (Math.random() < STORY_DM_CHANCE && ptProOk(key2)) toAsk.push(info2);
         }
       }
       return v;
@@ -678,7 +848,7 @@ function ptStoryScan(allowDm) {
 }
 
 // ── v0.3.6：NPC 主动事件调度（每个世界书 NPC 都可能主动开启事件：私信/登门/偶遇） ──
-var EVT_CHANCE = 0.4, EVT_MINGAP = 3, EVT_NPC_COOLDOWN = 20;
+var EVT_CHANCE = 0.15, EVT_MINGAP = 6, EVT_NPC_COOLDOWN = 20;
 function ptEventTick() {
   try {
     var evtMeta = (ptRead().pt && ptRead().pt._evt) || { turns: 0, last: -99, lastNpc: '', cd: {} };
@@ -711,6 +881,7 @@ function ptEventTick() {
           if (n === evtMeta.lastNpc) return false;
           var cd = evtMeta.cd || {};
           if (cd[n] != null && turns - cd[n] < EVT_NPC_COOLDOWN) return false;
+          if (!ptProOk(ptCanon(n))) return false;             // v0.3.12：单人主动冷却
           return true;
         });
         if (!candidates.length) return;
@@ -855,6 +1026,7 @@ function ptQuietPing() {
     if (npc && npc.muted) continue;
     if (waiting[id]) continue;
     if (npc && (npc.unread || 0) >= 2) continue;
+    if (!ptProOk(id)) continue;                          // v0.3.12：单人主动冷却
     withWant.push(id);
   }
   // 已有会话的人（有来往，TA 也可能惦记着事）
@@ -863,6 +1035,7 @@ function ptQuietPing() {
     if (n.muted || waiting[k] || (n.unread || 0) >= 2) continue;
     if (withWant.indexOf(k) !== -1) continue;
     if (!(n.dm_history || []).length) continue;      // 从没说过话的空会话不保底
+    if (!ptProOk(k)) continue;                           // v0.3.12：单人主动冷却
     others.push(k);
   }
   var pool = (withWant.length && Math.random() < 0.7) ? withWant : (others.length ? others : withWant);
@@ -912,7 +1085,7 @@ async function ptOnFloorLog() {
   }, 1600);
   ptEnsureTaglines();                                      // v0.3.9：身份短句补抓（读本地档案，不调 API）
   var npcs = sb.npcs || {};
-  // 1) 有待复信（NPC 上一条还没被回）→ 让剧情推着有人说话
+  // 1) 有待复信（NPC 上一条还没被回）→ 让剧情推着有人说话（v0.3.12：限 2 人、带 focus 走单人隔离通道）
   var pendingIds = [];
   for (var k in npcs) {
     if (!npcs.hasOwnProperty(k)) continue;
@@ -921,8 +1094,11 @@ async function ptOnFloorLog() {
   }
   if (pendingIds.length && pendingIds.length <= 3) {
     if (ptUnreadTotal(sb) >= BACKLOG_MAX) return;          // v0.3.9：积压超限，主动私信全线暂停
-    var names = pendingIds.map(function (id) { return (sb.npcs[id] && sb.npcs[id].name) || id; });
-    enqueueRequest({ reason: '剧情推进后，这几个人里该有人顺着正文的事发来新消息：' + names.join('、') + '。没有新鲜事的人保持沉默', n: '0-2', focus: [] });
+    pendingIds = pendingIds.filter(function (pid) { return ptProOk(pid); }).slice(0, 2);
+    if (pendingIds.length) {
+      var names = pendingIds.map(function (id) { return (sb.npcs[id] && sb.npcs[id].name) || id; });
+      enqueueRequest({ reason: '剧情推进后，顺着刚才正文发生的事，给玩家发一条新消息。没有新鲜事就保持沉默', n: '1', focus: pendingIds });
+    }
     return;
   }
   // 2) 偶尔一个体制陌生人主动来探路

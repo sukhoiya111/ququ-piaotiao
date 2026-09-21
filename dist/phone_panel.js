@@ -337,14 +337,22 @@
     var v = ptRead();
     var npcs = (v.pt && v.pt.npcs) || {};
     var sd = ptStatData() || {};
-    var ids = Object.keys(npcs).sort(function (a, b) { return (npcs[b].last_ts || 0) - (npcs[a].last_ts || 0); });
+    // v0.3.12：分组——「剧情与人脉」（账本联系人/家庭成员/正文登场者）在上，「其他」（探路生面孔）沉底
+    var known = {}, other = [];
+    Object.keys(npcs).forEach(function (id) {
+      var isKnown = !!(sd.contacts && sd.contacts[id]) || !!(sd.families && sd.families[id]) || npcs[id].source === 'story';
+      (isKnown ? known : other)[id] = true;   // known 作集合，other 保序
+    });
+    var otherIds = Object.keys(npcs).filter(function (id) { return !known[id]; });
+    var sortTs = function (a, b) { return (npcs[b].last_ts || 0) - (npcs[a].last_ts || 0); };
+    var ids = Object.keys(known).sort(sortTs).concat(otherIds.sort(sortTs));
     var ob = loadOutbox();
     var obCount = outboxCount();
     var banner = '';
     if (obCount > 0) {
       banner = '<div id="piaotiao-sendall" class="pt-banner"><span class="n">' + obCount + '</span><span class="t">📨 确定发送，等他们回复</span></div>';
     }
-    var rows = ids.map(function (id) {
+    function rowHtml(id) {
       var npc = npcs[id];
       var name = convName(sd, id);
       var unread = npc.unread || 0;
@@ -357,7 +365,12 @@
         '<span class="pt-prev">' + (queued > 0 ? '<span style="color:var(--blue);">✍️ 待发' + queued + '条 </span>' : '') + esc(npc.last_message || '') + '</span>' +
         (unread > 0 ? '<span class="pt-unread">' + unread + '</span>' : '') +
         '</span></div>';
-    }).join('');
+    }
+    var rows = Object.keys(known).sort(sortTs).map(rowHtml).join('');
+    if (otherIds.length) {
+      rows += '<div style="padding:6px 14px 4px;font-size:11px;color:var(--dim);background:' + C.bg + ';">—— 主动寻上门 ——</div>' +
+        otherIds.sort(sortTs).map(rowHtml).join('');
+    }
     return banner + '<div style="background:' + C.bg + ';">' + (rows || '<div style="padding:24px;color:var(--dim);text-align:center;font-size:13px;">暂无会话<br><span style="font-size:12px;">剧情里的微信往来会出现在这里</span></div>') + '</div>';
   }
   function bindWechatList() {
