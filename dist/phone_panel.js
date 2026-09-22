@@ -63,6 +63,9 @@
   }
   function outboxCount() { var ob = loadOutbox(), n = 0; for (var k in ob) { if (ob.hasOwnProperty(k)) n += (ob[k] || []).length; } return n; }
   function queueOutbox(id, line) {
+    // v0.3.17（三席联审 J2）：入队键规范为人名——与微信会话键/发送 linesByConv 同键。
+    // 旧行为联系人页入队写拼音 id，微信列表与线程只按人名读 → 待发消息隐身。
+    try { var nm = convName(null, id); if (nm) id = nm; } catch (e) {}
     var ob = loadOutbox();
     if (!ob[id]) ob[id] = [];
     ob[id].push(String(line));
@@ -290,8 +293,23 @@
   function panelVisible() { return panelHost && panelHost.style.display !== 'none'; }
 
   // ── 渲染 ──
+  // v0.3.3-W25 修复（J5）：全量 innerHTML 重建会把打字中的输入框连焦点带文字一起抹掉——
+  // 回信生成期（setTyping）与任意变量写完成（pt_updated）都会触发 render，恰是打字高峰。
+  // 面板内文本输入框持有焦点且非空时跳过本次全刷；发送/失焦后自然恢复刷新（数据仍在变量层）。
+  function typingGuardActive() {
+    try {
+      var act = document.activeElement;
+      if (!act || !panelEl || !panelEl.contains(act)) return false;
+      if (act.tagName === 'TEXTAREA') return !!act.value;
+      if (act.tagName !== 'INPUT') return false;
+      var t = (act.getAttribute('type') || 'text').toLowerCase();
+      if (t === 'checkbox' || t === 'radio' || t === 'button' || t === 'submit') return false;
+      return !!act.value;
+    } catch (eG) { return false; }
+  }
   function render() {
     if (!panelEl) return;
+    if (typingGuardActive()) return;
     try {
       var tabs = [['wechat', '微信'], ['contacts', '联系人'], ['notes', '备忘录'], ['gallery', '图鉴'], ['settings', '设置']];
       var head =

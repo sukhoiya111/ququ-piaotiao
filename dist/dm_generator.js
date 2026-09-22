@@ -347,6 +347,24 @@ function ptMergeFrags(v) { // 合并同名碎片（历史键混用过 family id/
     renamed.push(ids.join('+') + '→' + key2);
   }
   if (renamed.length) console.info(PT_TAG, '合并同名会话:', renamed.join(', '));
+  // v0.3.17（三席联审 J2）：发件箱键碎片迁移——联系人页旧数据曾用拼音 id 入队，而规范键=人名，
+  // 微信列表/线程只按人名读 → 待发消息隐身。键能折回人名的搬过去（幂等，只搬一次）。
+  var obx = v.pt && v.pt._outbox;
+  if (obx) {
+    var obMoved = [];
+    for (var ok in obx) {
+      if (!obx.hasOwnProperty(ok)) continue;
+      if (npcs[ok] || !Array.isArray(obx[ok]) || !obx[ok].length) continue;
+      var nm2 = ptIdToName(v, ok);
+      if (nm2 && nm2 !== ok && npcs[nm2]) {
+        if (!Array.isArray(obx[nm2])) obx[nm2] = [];
+        obx[nm2] = obx[nm2].concat(obx[ok]);
+        delete obx[ok];
+        obMoved.push(ok + '→' + nm2);
+      }
+    }
+    if (obMoved.length) console.info(PT_TAG, '发件箱键迁移:', obMoved.join(', '));
+  }
   return renamed.concat(renamedAll);
 }
 // ── 会话记录（pt.npcs[id]，id=人名） ──
@@ -625,14 +643,23 @@ function ptAttributeTo(rows, sb, targetId) {
 // ── 主流程（请求排队 + 合并，绝不丢单） ──
 var _busy = false, _pending = [];
 function ptMergeRequests(batch) {
-  var reasons = [], focus = [];
+  var reasons = [], focus = [], lines = {};
   for (var i = 0; i < batch.length; i++) {
     var p = batch[i] || {};
     if (p.reason) reasons.push(p.reason);
     if (Array.isArray(p.focus)) for (var f = 0; f < p.focus.length; f++) if (focus.indexOf(p.focus[f]) === -1) focus.push(p.focus[f]);
+    // v0.3.17（三席联审 M1）：回信请求的 linesByConv 必须随合并透传——旧行为只认 batch.length===1，
+    // 回信和主动请求同队时回信进 merged 却不带 lines，玩家消息既不入账又已清发件箱＝整包蒸发
+    if (p.linesByConv) for (var lid in p.linesByConv) {
+      if (!p.linesByConv.hasOwnProperty(lid)) continue;
+      if (!lines[lid]) lines[lid] = [];
+      lines[lid] = lines[lid].concat(p.linesByConv[lid]);
+    }
   }
   var n = (batch.length === 1 && batch[0] && batch[0].n) ? batch[0].n : (batch.length > 1 ? String(batch.length) + '-3' : '1-3');
-  return { reason: reasons.join('；同时：'), n: n, focus: focus };
+  var out = { reason: reasons.join('；同时：'), n: n, focus: focus };
+  if (Object.keys(lines).length) out.linesByConv = lines;
+  return out;
 }
 
 async function ptRunOnce(req) {
@@ -1186,17 +1213,24 @@ async function pumpRequests() {
   _pumping = true;
   try {
     while (_reqQueue.length) {
-      var batch = _reqQueue.splice(0, _reqQueue.length);
+      // v0.3.17（三席联审 M1）：玩家回信请求（linesByConv）独占一批——不与主动请求混批。
+      // 混批时回信走不了单人通道（ptRunOnce 按 req.linesByConv 分流），主动请求单独成批走原路。
+      var batch = [];
+      if (_reqQueue[0] && _reqQueue[0].linesByConv) {
+        while (_reqQueue.length && _reqQueue[0].linesByConv) batch.push(_reqQueue.shift());
+      } else {
+        while (_reqQueue.length && !_reqQueue[0].linesByConv) batch.push(_reqQueue.shift());
+      }
       var merged = ptMergeRequests(batch);
-      // 玩家先发的消息先入账（发件箱的 lines）
-      if (batch.length === 1 && batch[0].linesByConv) {
-        var lb = batch[0].linesByConv;
+      // 玩家先发的消息先入账（发件箱的 lines）——本批所有回信请求的 lines 按会话合并入账
+      var lbAll = merged.linesByConv;
+      if (lbAll) {
         await ptUpdate(function (v) {
           if (!v.pt) v.pt = { npcs: {}, _outbox: {} };
-          for (var id in lb) {
-            if (!lb.hasOwnProperty(id)) continue;
+          for (var id in lbAll) {
+            if (!lbAll.hasOwnProperty(id)) continue;
             var nm = ptIdToName(v, id);
-            for (var li = 0; li < lb[id].length; li++) ptPushMe(v, id, nm, lb[id][li]);
+            for (var li = 0; li < lbAll[id].length; li++) ptPushMe(v, id, nm, lbAll[id][li]);
           }
           return v;
         });
