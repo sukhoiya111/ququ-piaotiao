@@ -62,6 +62,15 @@
     return ptUpdate(function (v) { if (!v.pt) v.pt = { npcs: {} }; v.pt._outbox = ob; return v; }).then(function () { ptSaveChat(); });
   }
   function outboxCount() { var ob = loadOutbox(), n = 0; for (var k in ob) { if (ob.hasOwnProperty(k)) n += (ob[k] || []).length; } return n; }
+  // v0.3.18（三席联审 A6 轻方案）：独立 API 配置与否三处共用——sendAll 闸、微信列表/会话页
+  // 常驻提示条。没配 API 时消息永远停在待发箱（开局页还引导玩家去回话），必须常驻出声，
+  // 不能只靠 sendAll 那一次性 toast。
+  function ptApiReady() {
+    try {
+      var c = JSON.parse(lsGet('piaotiao_dm_api') || 'null');
+      return !!(c && ((c.url || c.apiurl) && c.key));
+    } catch (e) { return false; }
+  }
   function queueOutbox(id, line) {
     // v0.3.17（三席联审 J2）：入队键规范为人名——与微信会话键/发送 linesByConv 同键。
     // 旧行为联系人页入队写拼音 id，微信列表与线程只按人名读 → 待发消息隐身。
@@ -356,7 +365,10 @@
     var ob = loadOutbox();
     var obCount = outboxCount();
     var banner = '';
-    if (obCount > 0) {
+    if (obCount > 0 && !ptApiReady()) {
+      // A6：没配 API 时点「确定发送」也发不出去（消息全留在待发箱）——先提示补配置
+      banner = '<div id="piaotiao-noapi" class="pt-banner" style="background:#b3541e;cursor:default;"><span class="t" style="color:#fff;">⚠️ 还没填私信 API：消息发不出去，会一直留在待发箱——去「设置」补好地址和 Key</span></div>';
+    } else if (obCount > 0) {
       banner = '<div id="piaotiao-sendall" class="pt-banner"><span class="n">' + obCount + '</span><span class="t">📨 确定发送，等他们回复</span></div>';
     }
     // v0.3.13：①从无往来的空会话不进微信列表（人脉留在「联系人」页，谁真来过消息谁才出现）；
@@ -422,8 +434,7 @@
     var ob = loadOutbox();
     var ids = Object.keys(ob).filter(function (k) { return (ob[k] || []).length; });
     if (!ids.length) { toast('info', '队列为空'); return; }
-    var cfg = (function () { try { return JSON.parse(lsGet('piaotiao_dm_api') || 'null'); } catch (e) { return null; } })();
-    if (!cfg || !((cfg.url || cfg.apiurl) && cfg.key)) {
+    if (!ptApiReady()) {
       toast('warning', '先到「设置」填好独立 API 地址和 Key 再发送；你的消息还留在待发队列');
       return;
     }
@@ -499,6 +510,7 @@
       (queued > 0 ? '<span style="margin-left:auto;font-size:11px;color:var(--blue);">✍️ 待发' + queued + '条</span>' : '') + '</div>' +
       '<div class="pt-msgs">' + (items.join('') || '<div style="text-align:center;color:var(--dim);padding:20px;font-size:12px;">暂无消息</div>') + '</div>' +
       typing +
+      (!ptApiReady() && obMsgs.length ? '<div class="pt-banner" style="background:#b3541e;cursor:default;"><span class="t" style="color:#fff;">⚠️ 未填私信 API：待发消息发不出去——去「设置」补好地址和 Key</span></div>' : '') +
       '<div class="pt-chips">' + QUICK.map(function (q) { return '<span class="pt-chip" data-quick="' + esc(q) + '">' + esc(q) + '</span>'; }).join('') + '</div>' +
       '<div class="pt-inputbar"><input id="piaotiao-input" placeholder="发消息…（加入待发，回列表统一发送）" autocomplete="off" />' +
       '<button id="piaotiao-queue" class="pt-btn">加入待发</button></div></div>';
