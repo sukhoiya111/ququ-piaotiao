@@ -293,7 +293,7 @@
   function render() {
     if (!panelEl) return;
     try {
-      var tabs = [['wechat', '微信'], ['contacts', '联系人'], ['network', '关系网'], ['notes', '备忘录'], ['gallery', '图鉴'], ['settings', '设置']];
+      var tabs = [['wechat', '微信'], ['contacts', '联系人'], ['notes', '备忘录'], ['gallery', '图鉴'], ['settings', '设置']];
       var head =
         '<div id="piaotiao-drag-handle" style="background:' + C.header + ';padding:10px 14px;font-size:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;touch-action:none;">' +
         '<span>批条 · 这事，能办。</span><span id="piaotiao-close" style="cursor:pointer;color:' + C.dim + ';font-size:13px;">收起</span></div>' +
@@ -305,7 +305,6 @@
       var body = '';
       if (currentView === 'wechat') body = currentConv ? viewThread() : viewWechatList();
       else if (currentView === 'contacts') body = viewContacts();
-      else if (currentView === 'network') body = viewNetwork();
       else if (currentView === 'notes') body = viewNotes();
       else if (currentView === 'gallery') body = viewGallery();
       else if (currentView === 'settings') body = viewSettings();
@@ -323,13 +322,12 @@
     var close = panelEl.querySelector('#piaotiao-close');
     if (close) close.addEventListener('click', function (e) { e.stopPropagation(); closePanel(); });
     panelEl.querySelectorAll('[data-tab]').forEach(function (el) {
-      el.addEventListener('click', function (e) { e.stopPropagation(); currentView = el.getAttribute('data-tab'); currentConv = null; _netSel = null; render(); });
+      el.addEventListener('click', function (e) { e.stopPropagation(); currentView = el.getAttribute('data-tab'); currentConv = null; render(); });
     });
     if (currentView === 'wechat' && currentConv) bindThread();
     else if (currentView === 'wechat') bindWechatList();
     else if (currentView === 'settings') bindSettings();
     else if (currentView === 'contacts') bindContacts();
-    else if (currentView === 'network') bindNetwork();
   }
 
   // ── 微信列表 ──
@@ -692,145 +690,11 @@
     }
     return '<div style="padding:10px 14px;font-size:12px;color:var(--dim);">点联系人可直达会话（档案由账本驱动）</div>' +
       famBlocks + groupBlocks +
-      ((famBlocks || groupBlocks) ? '' : '<div style="padding:24px;color:var(--dim);text-align:center;">关系网尚未展开</div>');
+      ((famBlocks || groupBlocks) ? '' : '<div style="padding:24px;color:var(--dim);text-align:center;">联系人尚未入账</div>');
   }
   function bindContacts() {
     panelEl.querySelectorAll('[data-contact]').forEach(function (el) {
       el.addEventListener('click', function (e) { e.stopPropagation(); openConv(el.getAttribute('data-contact')); });
-    });
-  }
-
-  // ── 关系网（v0.3.10：登场者全入网——账本联系人+家庭成员+微信登场者按人名去重聚合） ──
-  var _netSel = null;                                        // 当前选中的节点 key（null=网络图视图）
-  function viewNetwork() {
-    var sd = ptStatData() || {};
-    var cs = sd.contacts || {};
-    var ptv = ptRead();
-    var allNpcs = (ptv && ptv.pt && ptv.pt.npcs) || {};
-    function outlineOfContact(id, c) {
-      // 优先显示能解决什么问题（can_provide），回退到身份短句（tagline），最后兜底 group+attitude
-      var cp = ptBare(c.can_provide);
-      if (cp && cp !== '—') return '能办：' + String(cp);
-      var n = allNpcs[id] || allNpcs[ptBare(c.name)];
-      if (n && n.tagline) return String(n.tagline);
-      return String(ptBare(c.group) || '其他') + '，对你' + String(ptBare(c.attitude) || '观望');
-    }
-    // 聚合三类登场来源；同名去重：联系人 > 家庭成员 > 微信登场者
-    var nodes = [];
-    var seenNames = {};
-    function pushNode(n) {
-      var nk = String(n.name || '').trim() || n.key;
-      if (seenNames[nk]) return;
-      seenNames[nk] = true;
-      nodes.push(n);
-    }
-    for (var id in cs) {
-      var c = cs[id];
-      pushNode({ key: 'c:' + id, kind: 'contact', id: id, name: String(ptBare(c.name) || id), rel: Number(ptBare(c.relationship)) || 0, outline: outlineOfContact(id, c) });
-    }
-    var fams = sd.families || {};
-    for (var fid in fams) {
-      var f = fams[fid];
-      var famName = String(ptBare(f.name) || fid);
-      function famNode(mem, role) {
-        if (!mem) return;
-        var nm = String(ptBare(mem.name) || '').trim();
-        if (!nm) return;
-        var tag = (allNpcs[nm] && allNpcs[nm].tagline) || (famName + '家' + role);
-        pushNode({ key: 'f:' + fid + ':' + nm, kind: 'family', id: nm, name: nm, rel: Number(ptBare(mem.relationship)) || 0, outline: tag, famName: famName, role: role, mem: mem });
-      }
-      famNode(f.head, '一家之主');
-      famNode(f.spouse, '配偶');
-      var ch = f.children || {};
-      for (var cid in ch) famNode(ch[cid], '子女');
-    }
-    for (var nid in allNpcs) {
-      var n = allNpcs[nid];
-      var hist = n.dm_history || [];
-      if (!hist.length) continue;              // 只收录真正登场往来过的（发过/收过私信）
-      var nmN = String(ptBare(n.name) || nid);
-      var tagN = n.tagline || ('微信上聊过 ' + hist.length + ' 条');
-      pushNode({ key: 'n:' + nid, kind: 'npc', id: nid, name: nmN, rel: null, outline: tagN, last: String(hist[hist.length - 1].content || ''), histLen: hist.length });
-    }
-    // 详情视图：点开某个节点
-    var sel = null;
-    if (_netSel) {
-      for (var si = 0; si < nodes.length; si++) { if (nodes[si].key === _netSel) { sel = nodes[si]; break; } }
-      if (!sel) _netSel = null;
-    }
-    function drow(label, v, color) {
-      return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px;"><span style="color:var(--dim);white-space:nowrap;">' + label + '</span><span style="color:' + (color || 'var(--text)') + ';text-align:right;">' + esc(String(v)) + '</span></div>';
-    }
-    if (sel) {
-      var headHtml = '<div style="padding:10px 14px 4px;"><span id="piaotiao-net-back" style="cursor:pointer;color:var(--dim);font-size:13px;">‹ 返回网络</span></div>' +
-        '<div style="padding:6px 16px 12px;border-bottom:1px solid var(--line);"><b style="font-size:16px;">' + esc(sel.name) + '</b>' +
-        '<div style="font-size:11px;color:var(--dim);margin-top:3px;">' + esc(sel.outline) + '</div></div>';
-      if (sel.kind === 'contact') {
-        var cD = cs[sel.id];
-        var lev = cD.leverage || [];
-        var relD = Number(ptBare(cD.relationship)) || 0;
-        var owedD = (cD.favors_owed || []).length, debtD = (cD.favors_debt || []).length;
-        return headHtml +
-          drow('关系', relD + ' / 100', relD >= 60 ? 'var(--green)' : relD < 20 ? 'var(--red)' : 'var(--text)') +
-          drow('对你的态度', ptBare(cD.attitude) || '—') +
-          drow('TA 想要', ptBare(cD.wants) || '—') +
-          drow('TA 能办', ptBare(cD.can_provide) || '—') +
-          drow('把柄', lev.length ? esc(lev.map(function (l) { return ptBare(l) || String(l); }).join('、')) : '暂无', lev.length ? 'var(--gold)' : 'var(--dim)') +
-          drow('把柄强度', (Number(ptBare(cD.leverage_strength)) || 0) + ' / 5') +
-          drow('人情账', '他欠我 ' + owedD + ' · 我欠他 ' + debtD) +
-          drow('状态', String(ptBare(cD.status) || '—'), String(ptBare(cD.status)) === 'hostile' ? 'var(--red)' : 'var(--green)');
-      }
-      if (sel.kind === 'family') {
-        var mD = sel.mem || {};
-        var relF = Number(ptBare(mD.relationship)) || 0;
-        var extraF = sel.role === '子女' ? drow('立场', ptBare(mD.stance) || '—')
-          : sel.role === '配偶' ? drow('同谋度', (Number(ptBare(mD.complicity)) || 0) + ' / 100')
-          : '';
-        return headHtml +
-          drow('家庭', sel.famName + '家 · ' + sel.role) +
-          drow('关系', relF + ' / 100', relF >= 60 ? 'var(--green)' : relF < 20 ? 'var(--red)' : 'var(--text)') +
-          drow('对家里的事察觉', (Number(ptBare(mD.awareness)) || 0) + ' / 100') +
-          extraF;
-      }
-      // npc：微信登场者（账本暂无正式档案）
-      return headHtml +
-        drow('结识渠道', '微信私信') +
-        drow('私信往来', sel.histLen + ' 条') +
-        drow('最后一条', sel.last ? sel.last.slice(0, 40) : '—', 'var(--dim)');
-    }
-    if (!nodes.length) return '<div style="padding:24px;color:var(--dim);text-align:center;">暂无节点</div>';
-    var W = 320, H = 380, cx = W / 2, cy = H / 2, R = nodes.length > 12 ? 132 : 118;
-    nodes.forEach(function (n, i) {
-      var ang = (Math.PI * 2 * i) / nodes.length - Math.PI / 2;
-      n.x = cx + R * Math.cos(ang);
-      n.y = cy + R * Math.sin(ang);
-    });
-    var lines = nodes.map(function (n) {
-      var lc = (n.rel === null || n.rel === undefined) ? C.dim : (n.rel >= 0 ? C.green : C.red);
-      return '<line x1="' + cx + '" y1="' + cy + '" x2="' + n.x + '" y2="' + n.y + '" stroke="' + lc + '" stroke-width="1.2" opacity="0.55" />';
-    }).join('');
-    // v0.3.10：节点圈姓名 + 圈下提纲；点击节点看详情（data-netnode 用聚合 key）
-    var dots = nodes.map(function (n) {
-      var words = n.outline.replace(/[，,。；].*$/, '').slice(0, 6);
-      return '<g data-netnode="' + esc(n.key) + '" style="cursor:pointer;">' +
-        '<circle cx="' + n.x + '" cy="' + n.y + '" r="24" fill="' + C.panel + '" stroke="' + C.blue + '" />' +
-        '<text x="' + n.x + '" y="' + (n.y + 1) + '" text-anchor="middle" font-size="11" fill="' + C.text + '">' + esc(n.name.slice(0, 4)) + '</text>' +
-        '<text x="' + n.x + '" y="' + (n.y + 38) + '" text-anchor="middle" font-size="9" fill="' + C.dim + '">' + esc(words) + '</text></g>';
-    }).join('');
-    return '<div style="padding:8px 14px 0;font-size:11px;color:var(--dim);">点节点看详情</div>' +
-      '<div style="flex:1;display:flex;align-items:center;"><svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:100%;">' + lines +
-      '<circle cx="' + cx + '" cy="' + cy + '" r="30" fill="' + C.mine + '" stroke="' + C.green + '" />' +
-      '<text x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" font-size="12" fill="#fff">我</text>' + dots + '</svg></div>';
-  }
-  function bindNetwork() {
-    var back = panelEl.querySelector('#piaotiao-net-back');
-    if (back) back.addEventListener('click', function (e) { e.stopPropagation(); _netSel = null; render(); });
-    panelEl.querySelectorAll('[data-netnode]').forEach(function (el) {
-      el.addEventListener('click', function (e) {
-        e.stopPropagation();
-        _netSel = el.getAttribute('data-netnode');
-        render();
-      });
     });
   }
 
@@ -1033,7 +897,7 @@
         if (bindEvents() || waited > 30000) clearInterval(timer);
       }, 400);
     }
-    console.info(TAG, '已挂载：悬浮手机（微信/联系人/关系网/备忘录/设置），可拖动');
+    console.info(TAG, '已挂载：悬浮手机（微信/联系人/备忘录/设置），可拖动');
     selfHealLoop();
   }
   mount();
