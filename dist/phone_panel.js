@@ -16,10 +16,12 @@
   var DOC = (typeof parent !== 'undefined' && parent.document) ? parent.document : document;
   var VIEW = DOC.defaultView || window;
 
+  // v0.3.21（用户拍板：微信白天模式）——白底灰卡、微信绿 #07c160 唯一强调、
+  // 我方气泡 #95ec69 / 对方纯白、文字 #191919，次级信息 #9c9c9c
   var C = {
-    bg: '#1b222c', panel: '#242e3a', header: '#2b3a4a', line: '#33414f',
-    text: '#cfd8e3', dim: '#8fa1b3', red: '#c0392b', green: '#2ecc71',
-    blue: '#4a7ba6', mine: '#33506e', theirs: '#313d4b', gold: '#d9a441',
+    bg: '#ededed', panel: '#ffffff', header: '#ededed', line: '#e0e0e0',
+    text: '#191919', dim: '#9c9c9c', red: '#fa5151', green: '#07c160',
+    blue: '#10aeff', mine: '#95ec69', theirs: '#ffffff', gold: '#bd8b23',
   };
 
   // ── 小工具 ──
@@ -199,9 +201,9 @@
   var CSS = [
     '#piaotiao-phone-panel{--bg:' + C.bg + ';--panel:' + C.panel + ';--header:' + C.header + ';--line:' + C.line + ';--text:' + C.text + ';--dim:' + C.dim + ';--red:' + C.red + ';--green:' + C.green + ';--blue:' + C.blue + ';--mine:' + C.mine + ';--theirs:' + C.theirs + ';--gold:' + C.gold + ';}',
     '#piaotiao-phone-panel *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}',
-    '#piaotiao-phone-panel .pt-row{display:flex;gap:10px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer;}',
-    '#piaotiao-phone-panel .pt-row:active{background:var(--header);}',
-    '#piaotiao-phone-panel .pt-ava{flex-shrink:0;width:40px;height:40px;border-radius:6px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;}',
+    '#piaotiao-phone-panel .pt-row{display:flex;gap:10px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel);cursor:pointer;}',
+    '#piaotiao-phone-panel .pt-row:active{background:#e5e5e5;}',
+    '#piaotiao-phone-panel .pt-ava{flex-shrink:0;width:40px;height:40px;border-radius:9px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;text-shadow:0 1px 2px rgba(0,0,0,.15);}',
     '#piaotiao-phone-panel .pt-ava.family{background:var(--red);}',
     '#piaotiao-phone-panel .pt-mid{flex:1;min-width:0;}',
     '#piaotiao-phone-panel .pt-name{font-size:14px;color:var(--text);display:flex;justify-content:space-between;align-items:baseline;gap:6px;min-width:0;}',
@@ -213,39 +215,43 @@
     '#piaotiao-phone-panel .pt-unread{background:var(--red);color:#fff;border-radius:10px;min-width:18px;text-align:center;font-size:11px;padding:2px 5px;flex-shrink:0;}',
     '#piaotiao-phone-panel .pt-time{font-size:10px;color:var(--dim);flex-shrink:0;}',
     '#piaotiao-phone-panel .pt-meta{font-size:12px;color:var(--dim);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-    '#piaotiao-phone-panel .pt-banner{margin:10px 12px 4px;background:var(--green);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3);}',
+    '#piaotiao-phone-panel .pt-banner{margin:10px 12px 4px;background:var(--green);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12);}',
     '#piaotiao-phone-panel .pt-banner .n{background:var(--red);color:#fff;border-radius:10px;min-width:20px;text-align:center;font-size:12px;font-weight:bold;padding:2px 6px;}',
-    '#piaotiao-phone-panel .pt-banner .t{color:#123;font-weight:bold;font-size:13px;}',
+    '#piaotiao-phone-panel .pt-banner .t{color:#fff;font-weight:bold;font-size:13px;}',
     '#piaotiao-phone-panel .pt-chat{display:flex;flex-direction:column;height:100%;}',
-    '#piaotiao-phone-panel .pt-chat-head{background:var(--header);padding:9px 12px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;flex-shrink:0;}',
+    '#piaotiao-phone-panel .pt-chat-head{background:var(--panel);padding:9px 12px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;flex-shrink:0;border-bottom:1px solid var(--line);}',
     '#piaotiao-phone-panel .pt-msgs{flex:1;overflow-y:auto;padding:8px 0;display:flex;flex-direction:column;gap:2px;}',
-    '#piaotiao-phone-panel .pt-msg{display:flex;padding:3px 10px;gap:8px;align-items:flex-end;}',
+    '#piaotiao-phone-panel .pt-msg{display:flex;padding:3px 12px;gap:8px;align-items:flex-end;}',
     '#piaotiao-phone-panel .pt-msg.mine{flex-direction:row-reverse;}',
-    '#piaotiao-phone-panel .pt-bub{max-width:78%;background:var(--theirs);color:var(--text);border-radius:12px;padding:7px 11px;font-size:13.5px;line-height:1.55;word-break:break-word;white-space:pre-wrap;}',
-    '#piaotiao-phone-panel .pt-msg.mine .pt-bub{background:var(--mine);}',
-    '#piaotiao-phone-panel .pt-bub.sys{background:transparent;color:var(--dim);font-size:11px;text-align:center;max-width:100%;}',
-    '#piaotiao-phone-panel .pt-bub.recall{background:transparent;color:var(--dim);font-size:12px;font-style:italic;}',
-    '#piaotiao-phone-panel .pt-bub.transfer{border:1px solid var(--gold);color:var(--gold);background:rgba(217,164,65,.08);}',
+    // v0.3.21 微信白天模式：对方白泡左尖角、我方浅绿泡右尖角
+    '#piaotiao-phone-panel .pt-bub{max-width:78%;background:var(--theirs);color:var(--text);border-radius:4px 12px 12px 12px;padding:7px 11px;font-size:13.5px;line-height:1.55;word-break:break-word;white-space:pre-wrap;box-shadow:0 1px 2px rgba(0,0,0,.06);}',
+    '#piaotiao-phone-panel .pt-msg.mine .pt-bub{background:var(--mine);border-radius:12px 4px 12px 12px;}',
+    '#piaotiao-phone-panel .pt-bub.sys{background:transparent;color:var(--dim);font-size:11px;text-align:center;max-width:100%;box-shadow:none;}',
+    '#piaotiao-phone-panel .pt-bub.recall{background:transparent;color:var(--dim);font-size:12px;font-style:italic;box-shadow:none;}',
+    '#piaotiao-phone-panel .pt-bub.transfer{border:1px solid var(--gold);color:var(--gold);background:#fdf6e9;}',
     '#piaotiao-phone-panel .pt-bub.voice{border-left:3px solid var(--blue);}',
     '#piaotiao-phone-panel .pt-tail{font-size:9px;color:var(--dim);margin-top:3px;text-align:right;}',
     '#piaotiao-phone-panel .pt-divider{text-align:center;font-size:10px;color:var(--dim);padding:6px 0 2px;}',
-    '#piaotiao-phone-panel .pt-inputbar{display:flex;gap:6px;padding:8px 10px;border-top:1px solid var(--line);background:var(--header);flex-shrink:0;}',
-    '#piaotiao-phone-panel .pt-inputbar input{flex:1;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:7px 10px;font-size:12px;outline:none;}',
+    '#piaotiao-phone-panel .pt-inputbar{display:flex;gap:8px;padding:8px 10px;border-top:1px solid var(--line);background:var(--panel);flex-shrink:0;align-items:center;}',
+    '#piaotiao-phone-panel .pt-inputbar input{flex:1;background:#f5f5f5;border:1px solid var(--line);color:var(--text);border-radius:17px;padding:8px 13px;font-size:13px;outline:none;}',
     '#piaotiao-phone-panel .pt-btn{border:none;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;color:#fff;background:var(--blue);}',
-    '#piaotiao-phone-panel .pt-btn.green{background:var(--green);color:#123;font-weight:bold;}',
+    '#piaotiao-phone-panel .pt-btn.send{border-radius:17px;background:var(--green);color:#fff;font-weight:bold;padding:8px 15px;font-size:13px;}',
+    '#piaotiao-phone-panel .pt-btn.green{background:var(--green);color:#fff;font-weight:bold;}',
     '#piaotiao-phone-panel .pt-btn.red{background:var(--red);}',
-    '#piaotiao-phone-panel .pt-btn.gray{background:var(--header);border:1px solid var(--line);color:var(--text);}',
+    '#piaotiao-phone-panel .pt-btn.gray{background:var(--panel);border:1px solid var(--line);color:var(--text);}',
     '#piaotiao-phone-panel .pt-chips{display:flex;gap:6px;overflow-x:auto;padding:6px 10px;flex-shrink:0;}',
     '#piaotiao-phone-panel .pt-chip{flex-shrink:0;background:var(--panel);border:1px solid var(--line);color:var(--dim);border-radius:14px;padding:4px 10px;font-size:11px;cursor:pointer;}',
     '#piaotiao-phone-panel .pt-typing{font-size:11px;color:var(--dim);padding:2px 14px 6px;font-style:italic;}',
     '#piaotiao-phone-panel .pt-cfg label{font-size:12px;color:var(--dim);display:block;margin:10px 14px 4px;}',
     '#piaotiao-phone-panel .pt-cfg input,#piaotiao-phone-panel .pt-cfg textarea,#piaotiao-phone-panel .pt-cfg select{width:calc(100% - 28px);margin:0 14px;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:7px 9px;font-size:12px;outline:none;resize:none;}',
     '#piaotiao-phone-panel input.piao-mask{-webkit-text-security:disc;}',
-    '#piaotiao-phone-panel .pt-menu{position:fixed;z-index:10001;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);overflow:hidden;min-width:120px;}',
+    '#piaotiao-phone-panel .pt-menu{position:fixed;z-index:10001;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);overflow:hidden;min-width:120px;}',
     '#piaotiao-phone-panel .pt-menu div{padding:9px 14px;font-size:13px;color:var(--text);cursor:pointer;border-bottom:1px solid var(--line);}',
     '#piaotiao-phone-panel .pt-menu div:last-child{border-bottom:none;}',
-    '#piaotiao-phone-panel .pt-menu div:active{background:var(--header);}',
+    '#piaotiao-phone-panel .pt-menu div:active{background:#e5e5e5;}',
     '#piaotiao-phone-panel svg text{font-family:system-ui,sans-serif;}',
+    // v0.3.21：窄屏适配（联审 J3 上轮欠账）——≤420px 时手机铺满可用宽高，页签字号已小无需再缩
+    '@media (max-width:420px){#piaotiao-phone-panel{width:calc(100vw - 12px) !important;height:calc(100vh - 80px) !important;}}',
   ].join('\n');
 
   function ensureCss() {
@@ -279,7 +285,7 @@
       panelEl = DOC.createElement('div');
       panelEl.id = 'piaotiao-phone-panel';
       panelEl.style.cssText = 'width:360px;max-width:94vw;height:600px;max-height:92vh;background:' + C.bg +
-        ';border:1px solid ' + C.line + ';border-radius:18px;box-shadow:0 10px 30px rgba(0,0,0,.55);display:flex;flex-direction:column;overflow:hidden;color:' + C.text + ';';
+        ';border:1px solid ' + C.line + ';border-radius:18px;box-shadow:0 10px 30px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;color:' + C.text + ';';
       panelHost.appendChild(panelEl);
     }
     renderFab();
@@ -292,7 +298,7 @@
     var badge = '';
     if (unread > 0) badge = '<span style="position:absolute;top:-6px;right:-6px;background:' + C.red + ';color:#fff;font-size:11px;min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;padding:0 4px;pointer-events:none;">' + unread + '</span>';
     else if (pending > 0) badge = '<span style="position:absolute;top:-6px;right:-6px;background:' + C.blue + ';color:#fff;font-size:11px;min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;padding:0 4px;pointer-events:none;">' + pending + '</span>';
-    root.innerHTML = '<div id="piaotiao-phone-btn" title="批条 · 手机（可拖动）" style="cursor:grab;width:52px;height:52px;border-radius:14px;background:' + C.header + ';border:1px solid ' + C.line + ';box-shadow:0 4px 14px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;position:relative;user-select:none;touch-action:none;">' +
+    root.innerHTML = '<div id="piaotiao-phone-btn" title="批条 · 手机（可拖动）" style="cursor:grab;width:52px;height:52px;border-radius:26px;background:' + C.green + ';box-shadow:0 4px 14px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;position:relative;user-select:none;touch-action:none;">' +
       '<span style="font-size:24px;pointer-events:none;">📱</span>' + badge + '</div>';
   }
 
@@ -325,13 +331,18 @@
     if (typingGuardActive()) return;
     try {
       var tabs = [['wechat', '微信'], ['contacts', '联系人'], ['notes', '备忘录'], ['gallery', '图鉴'], ['settings', '设置']];
+      // v0.3.21 微信白天模式：顶部双行页签收成窄标题栏（居中标题，拖拽手柄仍只认这一条），
+      // 五页签挪到底部导航（emoji 图标 + 未在页灰字/在页绿字）
+      var TAB_ICONS = { wechat: '💬', contacts: '👥', notes: '📖', gallery: '🏆', settings: '⚙️' };
       var head =
-        '<div id="piaotiao-drag-handle" style="background:' + C.header + ';padding:10px 14px;font-size:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;touch-action:none;">' +
-        '<span>批条 · 这事，能办。</span><span id="piaotiao-close" style="cursor:pointer;color:' + C.dim + ';font-size:13px;">收起</span></div>' +
-        '<div style="display:flex;border-bottom:1px solid ' + C.line + ';">' +
+        '<div id="piaotiao-drag-handle" style="background:' + C.bg + ';padding:11px 14px;font-size:15px;font-weight:bold;display:flex;justify-content:center;align-items:center;cursor:grab;user-select:none;touch-action:none;position:relative;border-bottom:1px solid ' + C.line + ';">' +
+        '<span>批条 · 这事，能办。</span><span id="piaotiao-close" style="position:absolute;right:14px;top:50%;transform:translateY(-50%);cursor:pointer;color:' + C.dim + ';font-size:13px;font-weight:normal;">收起</span></div>';
+      var tabbar =
+        '<div style="display:flex;border-top:1px solid ' + C.line + ';background:' + C.panel + ';flex-shrink:0;padding:4px 0 3px;">' +
         tabs.map(function (t) {
-          return '<div data-tab="' + t[0] + '" style="flex:1;text-align:center;padding:8px 0;cursor:pointer;font-size:13px;user-select:none;' +
-            (currentView === t[0] ? 'color:' + C.green + ';border-bottom:2px solid ' + C.green + ';' : 'color:' + C.dim + ';') + '">' + t[1] + '</div>';
+          return '<div data-tab="' + t[0] + '" style="flex:1;text-align:center;padding:2px 0;cursor:pointer;user-select:none;">' +
+            '<div style="font-size:17px;line-height:1.15;filter:' + (currentView === t[0] ? 'none' : 'grayscale(1)') + ';opacity:' + (currentView === t[0] ? '1' : '.55') + ';">' + TAB_ICONS[t[0]] + '</div>' +
+            '<div style="font-size:10.5px;margin-top:1px;color:' + (currentView === t[0] ? C.green : C.dim) + ';">' + t[1] + '</div></div>';
         }).join('') + '</div>';
       var body = '';
       if (currentView === 'wechat') body = currentConv ? viewThread() : viewWechatList();
@@ -339,7 +350,7 @@
       else if (currentView === 'notes') body = viewNotes();
       else if (currentView === 'gallery') body = viewGallery();
       else if (currentView === 'settings') body = viewSettings();
-      panelEl.innerHTML = head + '<div id="piaotiao-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;">' + body + '</div>';
+      panelEl.innerHTML = head + '<div id="piaotiao-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;background:' + C.bg + ';">' + body + '</div>' + tabbar;
       bindPanel();
       var sc = panelEl.querySelector('.pt-msgs');
       if (sc) sc.scrollTop = sc.scrollHeight;
@@ -517,7 +528,7 @@
       (!ptApiReady() && obMsgs.length ? '<div class="pt-banner" style="background:#b3541e;cursor:default;"><span class="t" style="color:#fff;">⚠️ 未填私信 API：待发消息发不出去——去「设置」补好地址和 Key</span></div>' : '') +
       '<div class="pt-chips">' + QUICK.map(function (q) { return '<span class="pt-chip" data-quick="' + esc(q) + '">' + esc(q) + '</span>'; }).join('') + '</div>' +
       '<div class="pt-inputbar"><input id="piaotiao-input" placeholder="发消息…（加入待发，回列表统一发送）" autocomplete="off" />' +
-      '<button id="piaotiao-queue" class="pt-btn">加入待发</button></div></div>';
+      '<button id="piaotiao-queue" class="pt-btn send" title="加入待发，回列表统一发送">发送</button></div></div>';
   }
   function renderOneMsg(m, idx) {
     var mine = m.sender === 'ME';
@@ -654,7 +665,7 @@
       var stMap = { offline: '已离场', hostile: '敌对' };
       var st = stMap[ptBare(c.status)];
       var tag = ((ptBare(c.attitude) || '') + (st ? '·' + st : ''));
-      return '<div class="pt-row" data-contact="' + esc(id) + '"><span class="pt-ava">' + esc(nm.slice(0, 1)) + '</span>' +
+      return '<div class="pt-row" data-contact="' + esc(id) + '"><span class="pt-ava" style="background:' + groupAvaColor(c) + ';">' + esc(nm.slice(0, 1)) + '</span>' +
         '<span class="pt-mid"><span class="pt-name"><span class="pt-nm">' + esc(nm) + '</span>' + (tag ? '<span class="pt-tag" style="color:' + (st === '敌对' ? 'var(--red)' : 'var(--dim)') + ';">' + esc(tag) + '</span>' : '') +
         taglineHtml(contactPreview(c, id, nm)) + '</span>' +
         '<span class="pt-meta">想要：' + esc(ptBare(c.wants) || '—') + '｜他欠我' + ((c.favors_owed || []).length) + '·我欠他' + ((c.favors_debt || []).length) + '</span></span></div>';
@@ -673,6 +684,9 @@
     }
     var claimed = {};                       // 已归入家庭块的人名，下方分栏不再重复
     var REQ_ST = { active: '进行中', completed: '已办结', failed: '已失败' };   // v0.3.20：事件/请求状态枚举不裸露英文
+    // v0.3.21：头像按分组着色（微信通讯录同款思路，一眼分清谁是谁家的人）
+    var GROUP_COLOR = { '官员': '#10aeff', '管理者': '#576b95', '中间人': '#bd8b23', '亲属': '#fa5151', '其他': '#8a8a8a' };
+    function groupAvaColor(c) { return GROUP_COLOR[String(ptBare(c && c.group) || '').trim()] || 'var(--blue)'; }
     function famRow(famLabel, name, role, rel, extra) {
       var nm = String(name || '').trim();
       if (!nm) return '';
