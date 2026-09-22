@@ -128,13 +128,21 @@
   function vpW() { return (VIEW.visualViewport && VIEW.visualViewport.width) || VIEW.innerWidth; }
   function vpH() { return (VIEW.visualViewport && VIEW.visualViewport.height) || VIEW.innerHeight; }
   function setClientPos(el, cx, cy) { el.style.right = 'auto'; el.style.bottom = 'auto'; el.style.left = ((cx - CAL.ox) / CAL.sx) + 'px'; el.style.top = ((cy - CAL.oy) / CAL.sy) + 'px'; }
-  function clampXY(x, y, margin) { return { x: Math.max(8, Math.min(x, vpW() - (margin || 64))), y: Math.max(8, Math.min(y, vpH() - (margin || 64))) }; }
+  // v0.3.22（真机 390px 窄屏实测翻车）：旧夹持按固定 64px 余量算右/下边界——那是按 52px 悬浮球
+  // 调的；面板 367px 宽时左上角最多只能夹到 vpW−64，右半截 303px 全挂在屏外（同浏览器从宽窗口
+  // 缩窄必踩）。改为按元素自身宽高夹持：任何元素都以「整体留在屏内（留 8px 边距）」为界，
+  // 悬浮球行为不变（52px 与旧 64px 余量几乎重合）。
+  function clampXY(x, y, el, margin) {
+    var w = (el && el.offsetWidth) || (margin || 64);
+    var h = (el && el.offsetHeight) || (margin || 64);
+    return { x: Math.max(8, Math.min(x, vpW() - w - 8)), y: Math.max(8, Math.min(y, vpH() - h - 8)) };
+  }
   function loadPos(key) { try { var s = lsGet(key); return s ? JSON.parse(s) : null; } catch (e) { return null; } }
   function savePos(key, x, y) { try { lsSet(key, JSON.stringify({ x: x, y: y })); } catch (e) {} }
   function applyPos(el, key, defFn) {
     recalib();
     var pos = loadPos(key);
-    if (pos) { var c = clampXY(pos.x, pos.y); setClientPos(el, c.x, c.y); return; }
+    if (pos) { var c = clampXY(pos.x, pos.y, el); setClientPos(el, c.x, c.y); return; }
     defFn();
   }
   // v0.3.1 修复：pointerdown 即 setPointerCapture 会把后续 click 重定向到捕获容器，
@@ -167,7 +175,7 @@
       if (!g.moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
       g.moved = true;
       recalib();
-      var c = clampXY(g.ox + dx, g.oy + dy);
+      var c = clampXY(g.ox + dx, g.oy + dy, el);
       setClientPos(el, c.x, c.y);
       e.preventDefault();
     }, true);
