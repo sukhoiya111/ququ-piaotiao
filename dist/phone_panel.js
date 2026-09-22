@@ -204,11 +204,15 @@
     '#piaotiao-phone-panel .pt-ava{flex-shrink:0;width:40px;height:40px;border-radius:6px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;}',
     '#piaotiao-phone-panel .pt-ava.family{background:var(--red);}',
     '#piaotiao-phone-panel .pt-mid{flex:1;min-width:0;}',
-    '#piaotiao-phone-panel .pt-name{font-size:14px;color:var(--text);display:flex;justify-content:space-between;align-items:baseline;gap:6px;}',
+    '#piaotiao-phone-panel .pt-name{font-size:14px;color:var(--text);display:flex;justify-content:space-between;align-items:baseline;gap:6px;min-width:0;}',
+    // v0.3.20（用户真机反馈）：三字名被状态标签挤得从中间断行（白景/舟）——
+    // 名字永不压缩不换行，标签与长句各自走省略号
+    '#piaotiao-phone-panel .pt-nm{flex-shrink:0;white-space:nowrap;}',
+    '#piaotiao-phone-panel .pt-tag{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}',
     '#piaotiao-phone-panel .pt-prev{font-size:12px;color:var(--dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '#piaotiao-phone-panel .pt-unread{background:var(--red);color:#fff;border-radius:10px;min-width:18px;text-align:center;font-size:11px;padding:2px 5px;flex-shrink:0;}',
     '#piaotiao-phone-panel .pt-time{font-size:10px;color:var(--dim);flex-shrink:0;}',
-    '#piaotiao-phone-panel .pt-meta{font-size:12px;color:var(--dim);margin-top:3px;}',
+    '#piaotiao-phone-panel .pt-meta{font-size:12px;color:var(--dim);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '#piaotiao-phone-panel .pt-banner{margin:10px 12px 4px;background:var(--green);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3);}',
     '#piaotiao-phone-panel .pt-banner .n{background:var(--red);color:#fff;border-radius:10px;min-width:20px;text-align:center;font-size:12px;font-weight:bold;padding:2px 6px;}',
     '#piaotiao-phone-panel .pt-banner .t{color:#123;font-weight:bold;font-size:13px;}',
@@ -644,10 +648,14 @@
     }
     function contactRow(id, c) {
       var nm = String(ptBare(c.name) || id);
-      var status = ptBare(c.status) || '?';
-      var color = status === 'hostile' ? 'var(--red)' : (status === 'active' || status === 'available') ? 'var(--green)' : 'var(--dim)';
+      // v0.3.20（用户真机反馈）：status 是内部字段（available/active/hostile/offline），
+      // 旧版把英文枚举直接糊进 UI（「利用available」）。现只翻译对玩家有意义的状态：
+      // 离场/敌对；正常在册（available/active）不显示任何状态字。
+      var stMap = { offline: '已离场', hostile: '敌对' };
+      var st = stMap[ptBare(c.status)];
+      var tag = ((ptBare(c.attitude) || '') + (st ? '·' + st : ''));
       return '<div class="pt-row" data-contact="' + esc(id) + '"><span class="pt-ava">' + esc(nm.slice(0, 1)) + '</span>' +
-        '<span class="pt-mid"><span class="pt-name">' + esc(nm) + '<span style="font-size:11px;color:' + color + ';">' + esc(ptBare(c.attitude) || '') + '·' + esc(status) + '</span>' +
+        '<span class="pt-mid"><span class="pt-name"><span class="pt-nm">' + esc(nm) + '</span>' + (tag ? '<span class="pt-tag" style="color:' + (st === '敌对' ? 'var(--red)' : 'var(--dim)') + ';">' + esc(tag) + '</span>' : '') +
         taglineHtml(contactPreview(c, id, nm)) + '</span>' +
         '<span class="pt-meta">想要：' + esc(ptBare(c.wants) || '—') + '｜他欠我' + ((c.favors_owed || []).length) + '·我欠他' + ((c.favors_debt || []).length) + '</span></span></div>';
     }
@@ -664,16 +672,17 @@
       return '｜他欠我' + ((hit.c.favors_owed || []).length) + '·我欠他' + ((hit.c.favors_debt || []).length);
     }
     var claimed = {};                       // 已归入家庭块的人名，下方分栏不再重复
+    var REQ_ST = { active: '进行中', completed: '已办结', failed: '已失败' };   // v0.3.20：事件/请求状态枚举不裸露英文
     function famRow(famLabel, name, role, rel, extra) {
       var nm = String(name || '').trim();
       if (!nm) return '';
       claimed[nm] = true;
-      var roleTag = role === '一家之主' ? '' : '<span style="font-size:10px;color:var(--gold);margin-left:6px;">' + role + '</span>';
+      var roleTag = role === '一家之主' ? '' : '<span style="font-size:10px;color:var(--gold);margin-left:6px;white-space:nowrap;">' + role + '</span>';
       var sub = taglineOf(nm, nm) ||
         (contactByName[nm] ? contactPreview(contactByName[nm].c, contactByName[nm].id, nm) : '') ||
         (famLabel + (role === '一家之主' ? '家主' : role) + '，家里的事瞒着TA也瞒着外头');
       return '<div class="pt-row" data-contact="' + esc(nm) + '"><span class="pt-ava family">' + esc(nm.slice(0, 1)) + '</span>' +
-        '<span class="pt-mid"><span class="pt-name">' + esc(nm) + roleTag + '<span style="font-size:11px;color:var(--dim);">' + esc(famLabel) + (rel !== null && rel !== undefined && rel !== '' ? '·关系' + esc(String(ptBare(rel))) : '') + '</span>' +
+        '<span class="pt-mid"><span class="pt-name"><span class="pt-nm">' + esc(nm) + '</span>' + roleTag + '<span class="pt-tag" style="color:var(--dim);">' + esc(famLabel) + (rel !== null && rel !== undefined && rel !== '' ? '·关系' + esc(String(ptBare(rel))) : '') + '</span>' +
         taglineHtml(sub) + '</span>' +
         '<span class="pt-meta">' + (extra || '') + contactMetaSuffix(nm) + '</span></span></div>';
     }
@@ -684,7 +693,7 @@
       var head = f.head || {};
       var hid = String(ptBare(head.name) || '').trim();
       var frows = '';
-      if (hid) frows += famRow(famLabel, hid, '一家之主', ptBare(head.relationship), '请求：' + esc(f.request ? ptBare(f.request.type) + '/' + ptBare(f.request.status) : '无') + '｜暴露：' + (ptBare(f.exposure_risk) || 0));
+      if (hid) frows += famRow(famLabel, hid, '一家之主', ptBare(head.relationship), '请求：' + esc(f.request ? ptBare(f.request.type) + '/' + (REQ_ST[ptBare(f.request.status)] || ptBare(f.request.status) || '无') : '无') + '｜暴露：' + (ptBare(f.exposure_risk) || 0));
       var sp = f.spouse || {};
       if (String(ptBare(sp.name) || '').trim()) frows += famRow(famLabel, ptBare(sp.name), '配偶', ptBare(sp.relationship), '察觉：' + (ptBare(sp.awareness) || 0) + '｜同谋：' + (ptBare(sp.complicity) || 0));
       var ch = f.children || {};
