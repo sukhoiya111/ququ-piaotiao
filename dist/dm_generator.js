@@ -31,11 +31,25 @@ function ptNotify(kind, msg) { try { toastr[kind](msg, '批条 · 手机'); } ca
 
 // ── 聊天级变量：读 + 串行写闸（参考卡同款结论：updateVariablesWith 是读→改→异步写，
 //    两次贴太近第二次会读到旧状态把人家的写覆盖掉——所有写排队过闸） ──
-var _updQ = Promise.resolve();
+// v0.3.23（三席联审 M7）：旧版面板与私信引擎各持一把 _updQ，两把锁写同一棵 pt 子树，
+// 军规 14「共用一把锁」跨模块不成立（症状与 M1 回信蒸发相同、根因不同）。两个模块由
+// phone-loader 在同一 iframe 里 eval，因此把锁挂到共享宿主 window：后加载者接同一根链条。
+// 关键：每次取锁都读宿主当前尾巴，绝不缓存本地变量（缓存会接到已过期的链上）。
+function ptWriteHost() {
+  try {
+    var w = (typeof window !== 'undefined') ? window : null;
+    if (!w) return null;
+    if (!w.__PiaotiaoWriteQ || typeof w.__PiaotiaoWriteQ.q === 'undefined') w.__PiaotiaoWriteQ = { q: Promise.resolve() };
+    return w.__PiaotiaoWriteQ;
+  } catch (e) { return null; }
+}
 function ptUpdate(fn) {
-  _updQ = _updQ.then(function () { return updateVariablesWith(fn, { type: 'chat' }); })
+  var host = ptWriteHost();
+  var tail = host ? host.q : Promise.resolve();
+  var next = tail.then(function () { return updateVariablesWith(fn, { type: 'chat' }); })
     .catch(function (e) { console.error(PT_TAG, '写变量失败', e); ptNotify('error', '写变量失败: ' + ((e && e.message) || e)); });
-  return _updQ;
+  if (host) host.q = next;
+  return next;
 }
 function ptRead() { try { return getVariables({ type: 'chat' }) || {}; } catch (e) { return {}; } }
 
@@ -165,15 +179,29 @@ function ptProOk(id) {
 }
 // 单人正文窗口：只给"TA 在场的楼"——TA 名字出现在哪楼，才看得见哪楼的正文；
 // 不在场的楼一律看不到（包括玩家的内心独白）。这是硬过滤，不再靠提示词自觉。
+// v0.3.23（三席联审 M4）：旧实现只按「名字出现在正文里」判在场——玩家当面说话不点名
+//（「您看这事……」）的楼被排除出记忆窗口，NPC 因此失忆；而玩家内心独白提到名字反倒被
+// 注入。记忆边界铁律只堵了「多给」没堵「少给」，恰在要防的方向开洞。现在在场判定补上
+// 「紧邻在场楼的玩家楼层」：TA 就在那场戏里，玩家对TA说的话 TA 听得到。
 async function ptPlotFor(name) {
   try {
     var arr = await getChatMessages('0-{{lastMessageId}}');
     if (!arr || !arr.length) return '';
+    var from = Math.max(0, arr.length - 6);
+    var present = {};                       // 楼号 → TA 在场
+    for (var k = from; k < arr.length; k++) {
+      var isUserK = arr[k].is_user || arr[k].role === 'user';
+      if (isUserK) continue;
+      var tk = ptCleanProse(arr[k].message);
+      if (tk && tk.indexOf(name) !== -1) present[k] = true;
+    }
     var out = [];
-    for (var i = Math.max(0, arr.length - 6); i < arr.length; i++) {
+    for (var i = from; i < arr.length; i++) {
       var t = ptCleanProse(arr[i].message);
-      if (!t || t.indexOf(name) === -1) continue;
-      out.push((arr[i].is_user || arr[i].role === 'user' ? '我（玩家对TA说/做）：' : '正文：') + t);
+      if (!t) continue;
+      var isUser = arr[i].is_user || arr[i].role === 'user';
+      if (!present[i] && !(isUser && (present[i - 1] || present[i + 1]))) continue;
+      out.push((isUser ? '我（玩家对TA说/做）：' : '正文：') + t);
     }
     var joined = out.join('\n');
     return joined.length > 1800 ? joined.slice(-1800) : joined;
@@ -864,7 +892,17 @@ var AUTO_STRANGER_CHANCE = 0.06, AUTO_STRANGER_MINGAP = 10, AUTO_STRANGER_MAXPEN
 // QUIET_TRIGGER：连续 N 次楼层调度完全没有产生任何事件（私信/登门/偶遇都没有）→ 保底轮
 // 随机抽一个"可能有需求"的 NPC 主动发 1 条。
 // PRO_GAP：单人主动冷却——任何人被引擎主动私信后，10 楼内不再被任何主动来源点名（回信豁免）。
-var BACKLOG_MAX = 3, QUIET_TRIGGER = 6, _quietStreak = 0, PRO_GAP = 10;
+// v0.3.23（三席联审 M11）：上限由 3 提到 4——开局三条种子私信各 unread=1，总数恰好顶满 3，
+// 于是从第一楼起待复信/事件/陌生人/保底全线暂停（玩家读私信前手机是「死」的，会误判成 API 坏）。
+// 提到 4 给开局留一格余量，同时保留「积压就闭嘴」这个设计意图。
+var BACKLOG_MAX = 4, QUIET_TRIGGER = 6, _quietStreak = 0, PRO_GAP = 10;
+// v0.3.23（三席联审 M5）：节奏观测改用「活动序号」——任何请求入队即自增。旧实现 1.6s 后比
+// 请求队列长度，而 enqueueRequest 会立刻 shift 清空队列、_busy 语义也对不上，导致剧情/事件
+// 私信对观测完全不可见：刚生成过私信的楼照样累加 _quietStreak，QUIET_TRIGGER 一到就
+// 「刚聊完又来一条」。序号与队列清空解耦，判据不再看瞬时长度。
+var _activitySeq = 0;
+function ptMarkActivity() { _activitySeq++; }
+function ptActivitySeq() { return _activitySeq; }
 // ── v0.3.5：剧情成员同步（正文出场人物自动入列 + 察觉变化触发剧情私信） ──
 var STORY_DM_CHANCE = 0.12, STORY_DM_COOLDOWN = 8;
 function ptFloorNo() { try { return (parent.SillyTavern && parent.SillyTavern.getContext().chat.length) || 0; } catch (e) { return 0; } }
@@ -1150,6 +1188,9 @@ async function ptOnFloorLog() {
     if (_lastFloorSeen < 0 && sb._lastLogFloor != null) _lastFloorSeen = sb._lastLogFloor;  // 刷新后从聊天级恢复
     if (curFloor === _lastFloorSeen) return;               // 同楼重放（生成结束/全局脚本/编辑都会再触发）→ 跳过
     _lastFloorSeen = curFloor;
+    // v0.3.23（M5 持久写点）：刷新会清掉内存里的 _quietStreak；若上一楼刚有过私信活动，
+    // 不该马上判「冷场」——用聊天级写点补一次（跨刷新仍认得出「刚聊过」）
+    if (sb._lastDmFloor != null && curFloor - sb._lastDmFloor <= 1) _quietStreak = 0;
     // v0.3.11：写点前移（fire-and-forget 过串行闸）——下方待复信/积压超限/未配API几条提前return
     // 也要记楼，否则刷新后恢复不到楼号，同楼重放多跑一遍（Bug H 遗留项）
     ptUpdate(function (v) { if (v.pt) v.pt._lastLogFloor = curFloor; return v; });
@@ -1159,18 +1200,22 @@ async function ptOnFloorLog() {
   if (!cfg) return;                                        // 未配置独立 API：正文楼什么都不做
   ptStoryScan(true);                                       // v0.3.5：察觉变化 → 剧情私信候选
   ptEventTick();                                           // v0.3.6：NPC 主动事件调度（私信/登门/偶遇）
-  // v0.3.9：节奏观测——1.6s 后看这波调度有没有产生任何动静（请求入队/事件命中）；
-  // 连续 QUIET_TRIGGER 次毫无动静 → 保底轮随机抽一个有需求的人开口（回信请求不算事件）
-  var qBefore = _reqQueue.length + (_busy ? 1 : 0);
+  // v0.3.9 起的节奏观测；v0.3.23（三席联审 M5）改判据：旧版 1.6s 后比请求队列长度，而
+  // enqueueRequest 立刻 shift 清空队列 → 剧情/事件私信对观测不可见，刚聊过也照累加。
+  // 现在只看「活动序号是否前进」（入队即自增，与队列清空解耦）+ 事件写点。
+  var seqBefore = ptActivitySeq();
   var evtLastBefore = (sb._evt && sb._evt.last != null) ? sb._evt.last : -99;
   setTimeout(function () {
     try {
       var nowV = ptRead();
       var ptNow = nowV && nowV.pt;
       if (!ptNow) return;
-      var qAfter = _reqQueue.length + (_busy ? 1 : 0);
       var evtNow = (ptNow._evt && ptNow._evt.last != null) ? ptNow._evt.last : -99;
-      if (qAfter > qBefore || evtNow !== evtLastBefore) { _quietStreak = 0; return; }
+      if (ptActivitySeq() > seqBefore || evtNow !== evtLastBefore) {
+        _quietStreak = 0;
+        if (curFloor >= 0) ptUpdate(function (v) { if (v.pt) v.pt._lastDmFloor = curFloor; return v; });
+        return;
+      }
       _quietStreak++;
       if (_quietStreak >= QUIET_TRIGGER) ptQuietPing();
     } catch (eQ) { console.warn(PT_TAG, '节奏观测失败', eQ); }
@@ -1218,6 +1263,7 @@ var _reqQueue = [];
 function enqueueRequest(req, urgent) {
   // v0.3.7：玩家回信插队（urgent）——回信排在剧情私信/事件请求前面，体验即时
   if (urgent && _reqQueue.length) { _reqQueue.unshift(req); } else { _reqQueue.push(req); }
+  ptMarkActivity();   // v0.3.23（M5）：入队即记活动，供节奏观测判「有没有动静」
   pumpRequests();
 }
 var _pumping = false;

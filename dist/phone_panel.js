@@ -38,14 +38,43 @@
   function dayKey(ts) { var d = ts ? new Date(ts) : new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
 
   // ── 数据层：聊天级 pt 命名空间 + 串行写闸（updateVariablesWith 读→改→异步写，贴近必覆盖） ──
-  var _updQ = Promise.resolve();
+  // v0.3.23（三席联审 M7）：面板与私信引擎原本各持一把锁、都写同一棵 pt 子树，军规 14 的
+  // 「共用一把锁」跨模块不成立。两个模块由 phone-loader 在同一 iframe 里 eval，故锁挂共享宿主
+  // window：先加载者建，后加载者接同一根链条。每次取锁都读宿主当前尾巴，不缓存本地变量。
+  function ptWriteHost() {
+    try {
+      var w = (typeof window !== 'undefined') ? window : null;
+      if (!w) return null;
+      if (!w.__PiaotiaoWriteQ || typeof w.__PiaotiaoWriteQ.q === 'undefined') w.__PiaotiaoWriteQ = { q: Promise.resolve() };
+      return w.__PiaotiaoWriteQ;
+    } catch (e) { return null; }
+  }
   function ptRead() { try { return getVariables({ type: 'chat' }) || {}; } catch (e) { return {}; } }
   function ptUpdate(fn) {
-    _updQ = _updQ.then(function () { return updateVariablesWith(fn, { type: 'chat' }); })
+    var host = ptWriteHost();
+    var tail = host ? host.q : Promise.resolve();
+    var next = tail.then(function () { return updateVariablesWith(fn, { type: 'chat' }); })
       .catch(function (e) { console.error(TAG, '写变量失败', e); toast('error', '写变量失败: ' + ((e && e.message) || e)); });
-    return _updQ;
+    if (host) host.q = next;
+    return next;
   }
-  function ptSaveChat() { try { VIEW.SillyTavern && VIEW.SillyTavern.saveChat && VIEW.SillyTavern.saveChat(); } catch (e) {} }
+  // v0.3.23（三席联审 M10）：旧写法只探 VIEW.SillyTavern.saveChat——不在本体上就是静默 no-op、
+  // 外层 catch 空吞（疑似死代码）。聊天级变量本身由 TH 的 updateVariablesWith 落盘，这里只是
+  // 保险：逐级找可用的保存入口，全找不到时留一条 console 证据（不再静默）。
+  var _saveChatWarned = false;
+  function ptSaveChat() {
+    try {
+      if (VIEW.SillyTavern && typeof VIEW.SillyTavern.saveChat === 'function') { VIEW.SillyTavern.saveChat(); return; }
+    } catch (e0) { /* 继续找下一级 */ }
+    try {
+      var ctx = VIEW.SillyTavern && VIEW.SillyTavern.getContext ? VIEW.SillyTavern.getContext() : null;
+      if (ctx && typeof ctx.saveChat === 'function') { ctx.saveChat(); return; }
+    } catch (e1) { /* 继续 */ }
+    if (!_saveChatWarned) {
+      _saveChatWarned = true;
+      console.info(TAG, '未找到 saveChat 入口：聊天级变量由酒馆助手自行落盘，跳过显式保存');
+    }
+  }
   function ptStatData() {
     try {
       var mid = null;
@@ -580,12 +609,21 @@
     // 消息长按菜单：撤回（自己的）/重掷（对方最后一条）/删除
     var pressTimer = null;
     panelEl.querySelectorAll('.pt-msg').forEach(function (el) {
+      var px = 0, py = 0;
       el.addEventListener('contextmenu', function (e) { e.preventDefault(); showMsgMenu(el); });
-      el.addEventListener('pointerdown', function () {
+      el.addEventListener('pointerdown', function (e) {
+        px = e.clientX || 0; py = e.clientY || 0;
         pressTimer = setTimeout(function () { showMsgMenu(el); }, 550);
       });
-      ['pointerup', 'pointerleave', 'pointermove'].forEach(function (ev) {
+      ['pointerup', 'pointerleave'].forEach(function (ev) {
         el.addEventListener(ev, function () { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } });
+      });
+      // v0.3.23（三席联审 J9）：旧版把 pointermove 也挂进「一有动作就取消」——手指微颤 1px
+      // 菜单就没了，撤回/重掷在触屏上近乎不可用。改为累计位移 >6px 才算「移动了」
+      //（与拖拽同款阈值），位移小于阈值时按住不动仍会正常弹出。
+      el.addEventListener('pointermove', function (e) {
+        if (!pressTimer) return;
+        if (Math.abs((e.clientX || 0) - px) + Math.abs((e.clientY || 0) - py) > 6) { clearTimeout(pressTimer); pressTimer = null; }
       });
     });
     function showMsgMenu(el) {
@@ -634,11 +672,25 @@
   // v0.3.15：客户/关系人分类系统——家庭按「家姓+家」自动归类（家姓缺省时取户主姓氏首字），
   // 其余联系人按 group 值分栏；已归入家庭块的人不再在分栏里重复出现
   var CONTACT_GROUP_ORDER = ['官员', '管理者', '中间人', '亲属', '其他'];
+  // v0.3.23（三席联审 J7）：面板侧补上账房侧已做的家姓边界判断（同一函数两侧，M9 只修了账房）。
+  // 旧实现两个显示边界：① f.name 写了全名（陈国邦）→ 渲染「陈国邦家」；② f.name 与 head.name
+  // 双缺（老档 fid 就是 chen/ruan 拼音）→ 渲染「chen家」拼音直出。现：合法家姓（1~2 汉字、
+  // 不带「家」字）直接用；否则依次取 f.name 里的汉字、户主姓名里的汉字；仍取不到就不出标题
+  // （宁可少一行标题，也不给玩家看拼音），并留一条 console 证据。
   function famLabelOf(fid, f) {
     var raw = String(ptBare(f && f.name) || '').trim();
-    if (!raw) {
+    if (raw.length > 1 && raw.slice(-1) === '家') raw = raw.slice(0, -1);   // 写成「阮家」也认
+    var legal = !!raw && raw.length <= 2 && !/[A-Za-z0-9]/.test(raw);
+    if (!legal) {
       var hn = String(ptBare(f && f.head && f.head.name) || '').trim();
-      raw = hn ? hn.slice(0, 1) : String(fid || '');
+      var fromName = (raw.match(/[\u4e00-\u9fa5]/) || [])[0] || '';
+      var fromHead = (hn.match(/[\u4e00-\u9fa5]/) || [])[0] || '';
+      raw = fromName || fromHead || '';
+    }
+    if (!raw) {
+      var fidTxt = String(fid || '').trim();
+      if (/^[\u4e00-\u9fa5]{1,2}$/.test(fidTxt)) raw = fidTxt;              // fid 本身是汉字才算数
+      else console.info(TAG, '家姓缺失且无从推断，家庭块不出标题：fid=' + fidTxt);
     }
     if (!raw) return '';
     return /家$/.test(raw) ? raw : raw + '家';
@@ -734,11 +786,17 @@
       if (frows) famBlocks += groupHeader(famLabel) + frows;
     }
     var buckets = {}, tailOrder = [];
+    var famGroupDup = 0;                    // v0.3.23（J10）：家庭成员同时带官员/管理者等身份的人数
     for (var id in cs) {
       var c = cs[id];
       var nm = String(ptBare(c.name) || id).trim();
-      if (claimed[nm]) continue;
       var g = String(ptBare(c.group) || '其他').trim() || '其他';
+      if (claimed[nm]) {
+        // 家庭块优先、分栏跳过是确定行为（家庭块赢），但玩家会疑惑「官员栏怎么少了人」——
+        // 数一下，末尾给一行灰字说明（不是 bug，是设计取向）。
+        if (g && g !== '亲属') famGroupDup++;
+        continue;
+      }
       if (!buckets[g]) { buckets[g] = []; if (CONTACT_GROUP_ORDER.indexOf(g) < 0) tailOrder.push(g); }
       buckets[g].push(contactRow(id, c));
     }
@@ -749,8 +807,11 @@
       if (!buckets[gk] || !buckets[gk].length) continue;
       groupBlocks += groupHeader(gk) + buckets[gk].join('');
     }
+    var dupNote = famGroupDup
+      ? '<div style="padding:6px 14px 14px;font-size:11px;color:var(--dim);line-height:1.7;">（有 ' + famGroupDup + ' 位同时身兼官方身份，已归在自家块里，不再在下栏重复列出。）</div>'
+      : '';
     return '<div style="padding:10px 14px;font-size:12px;color:var(--dim);">点联系人可直达会话（档案由账本驱动）</div>' +
-      famBlocks + groupBlocks +
+      famBlocks + groupBlocks + dupNote +
       ((famBlocks || groupBlocks) ? '' : '<div style="padding:24px;color:var(--dim);text-align:center;">联系人尚未入账</div>');
   }
   function bindContacts() {
@@ -842,8 +903,15 @@
       var right = rec
         ? '<span style="color:var(--green);font-size:11px;flex-shrink:0;">✓ ' + fmtDay(rec.ts) + '</span>'
         : '<span style="color:var(--dim);font-size:11px;flex-shrink:0;">未解锁</span>';
-      rows += '<div class="pt-row" style="cursor:default;' + (isCur ? 'border-left:3px solid var(--gold);' : '') + '">' +
-        '<span class="pt-ava" style="' + (rec ? 'background:var(--gold);' : 'filter:grayscale(1);opacity:.5;') + '">' + (rec ? x : '?') + '</span>' +
+      // v0.3.23（三席联审 J6）：解锁态与未解锁原来只差一行小字，图鉴这个「晒卡传播页」零记忆点。
+      // 解锁行加金边 + 浅金底 + 头像角的「办」字印章（纯内联样式，零 CDN、零新依赖）。
+      var seal = rec
+        ? '<span style="position:absolute;right:-3px;bottom:-3px;width:15px;height:15px;border-radius:3px;background:var(--gold);color:#fff;font-size:10px;line-height:15px;text-align:center;font-weight:bold;">办</span>'
+        : '';
+      rows += '<div class="pt-row" style="cursor:default;' +
+        (rec ? 'border:1px solid var(--gold);background:rgba(189,139,35,.07);' : '') +
+        (isCur ? 'border-left:3px solid var(--gold);' : '') + '">' +
+        '<span class="pt-ava" style="position:relative;' + (rec ? 'background:var(--gold);' : 'filter:grayscale(1);opacity:.5;') + '">' + (rec ? x : '?') + seal + '</span>' +
         '<span class="pt-mid"><span class="pt-name"><span>' + (rec ? esc(m[0]) : '<span style="color:var(--dim);">？？？</span>') +
         (isCur ? ' <span style="font-size:10px;color:var(--gold);">本局</span>' : '') + '</span>' + right + '</span>' +
         '<span class="pt-prev">' + (rec ? esc(m[1]) : '这条路线还没有人走到头') + '</span></span></div>';
@@ -877,7 +945,12 @@
     var keyInput = panelEl.querySelector('#piaotiao-cfg-key');
     if (keyInput) {
       keyInput.readOnly = true;
-      panelHost.addEventListener('focusin', function (e) { if (e.target && e.target.id === 'piaotiao-cfg-key') e.target.removeAttribute('readonly'); });
+      // v0.3.23（三席联审 J10）：bindSettings 每次 render 都跑，而监听挂在长期存在的 panelHost 上
+      // → 每渲染一次设置页就叠一层同名监听（进设置页几十次就是几十个回调）。改一次性绑定。
+      if (!panelHost.__PiaotiaoCfgFocusBound) {
+        panelHost.__PiaotiaoCfgFocusBound = true;
+        panelHost.addEventListener('focusin', function (e) { if (e.target && e.target.id === 'piaotiao-cfg-key') e.target.removeAttribute('readonly'); });
+      }
     }
     var save = panelEl.querySelector('#piaotiao-cfg-save');
     if (save) save.addEventListener('click', function (e) {
@@ -958,7 +1031,7 @@
         if (bindEvents() || waited > 30000) clearInterval(timer);
       }, 400);
     }
-    console.info(TAG, '已挂载：悬浮手机（微信/联系人/备忘录/设置），可拖动');
+    console.info(TAG, '已挂载：悬浮手机（微信/联系人/备忘录/图鉴/设置），可拖动');
     selfHealLoop();
   }
   mount();
