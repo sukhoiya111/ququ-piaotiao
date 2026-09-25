@@ -22,6 +22,8 @@
     bg: '#ededed', panel: '#ffffff', header: '#ededed', line: '#e0e0e0',
     text: '#191919', dim: '#9c9c9c', red: '#fa5151', green: '#07c160',
     blue: '#10aeff', mine: '#95ec69', theirs: '#ffffff', gold: '#bd8b23',
+    // v0.3.25（三席联审 J16）：警告语义色收进 token 表——原来三处散落字面量改主题必漏
+    warn: '#b3541e', err: '#e74c3c',
   };
 
   // ── 小工具 ──
@@ -154,6 +156,9 @@
       CAL = { ox: r.left, oy: r.top, sx: (r.width / 100) || 1, sy: (r.height / 100) || 1 };
     } catch (e) {}
   }
+  // v0.3.25（三席联审 J13）：校准从「每个 pointermove 一次」改为「拖拽起点一次＋视口 resize 补校准」——
+  // 旧版 move 事件里建删 DOM 探针＝每次移动强制回流，高轮询鼠标一秒上千次，拖拽发涩
+  if (VIEW.visualViewport) VIEW.visualViewport.addEventListener('resize', function () { recalib(); });
   function vpW() { return (VIEW.visualViewport && VIEW.visualViewport.width) || VIEW.innerWidth; }
   function vpH() { return (VIEW.visualViewport && VIEW.visualViewport.height) || VIEW.innerHeight; }
   function setClientPos(el, cx, cy) { el.style.right = 'auto'; el.style.bottom = 'auto'; el.style.left = ((cx - CAL.ox) / CAL.sx) + 'px'; el.style.top = ((cy - CAL.oy) / CAL.sy) + 'px'; }
@@ -192,7 +197,9 @@
       }, 350);
     }
     handle.addEventListener('pointerdown', function (e) {
-      if (g) return;
+      // v0.3.25（三席联审 J17）：零捕获＋document 级跟踪的代价——指针在窗口外松手时 pointerup
+      // 不入 DOC，旧手势卡死会拒绝一切新拖拽。新指针按下且 pid 不同＝旧手势已死，接管。
+      if (g) { if (g.pid === e.pointerId) return; g = null; }
       if (gate && !(e.target && e.target.closest && e.target.closest(gate))) return;
       var r = el.getBoundingClientRect();
       g = { pid: e.pointerId, sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
@@ -202,8 +209,8 @@
       if (!g || e.pointerId !== g.pid) return;
       var dx = e.clientX - g.sx, dy = e.clientY - g.sy;
       if (!g.moved && Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      if (!g.moved) recalib(); // v0.3.25（J13）：校准只在拖拽起点做一次，move 循环用缓存
       g.moved = true;
-      recalib();
       var c = clampXY(g.ox + dx, g.oy + dy, el);
       setClientPos(el, c.x, c.y);
       e.preventDefault();
@@ -395,7 +402,7 @@
       if (sc) sc.scrollTop = sc.scrollHeight;
     } catch (e) {
       try { console.error(TAG, '渲染失败', e); toastr.error('渲染失败：' + ((e && e.message) || e), '批条 · 手机'); } catch (e2) {}
-      if (panelEl) panelEl.innerHTML = '<div style="padding:16px;color:#e74c3c;font-size:13px;">渲染失败：' + esc(String(e && e.message || e)) + '</div>';
+      if (panelEl) panelEl.innerHTML = '<div style="padding:16px;color:' + C.err + ';font-size:13px;">渲染失败：' + esc(String(e && e.message || e)) + '</div>';
     }
   }
 
@@ -421,7 +428,7 @@
     var banner = '';
     if (obCount > 0 && !ptApiReady()) {
       // A6：没配 API 时点「确定发送」也发不出去（消息全留在待发箱）——先提示补配置
-      banner = '<div id="piaotiao-noapi" class="pt-banner" style="background:#b3541e;cursor:default;"><span class="t" style="color:#fff;">⚠️ 还没填私信 API：消息发不出去，会一直留在待发箱——去「设置」补好地址和 Key</span></div>';
+      banner = '<div id="piaotiao-noapi" class="pt-banner" style="background:' + C.warn + ';cursor:default;"><span class="t" style="color:#fff;">⚠️ 还没填私信 API：消息发不出去，会一直留在待发箱——去「设置」补好地址和 Key</span></div>';
     } else if (obCount > 0) {
       banner = '<div id="piaotiao-sendall" class="pt-banner"><span class="n">' + obCount + '</span><span class="t">📨 确定发送，等他们回复</span></div>';
     }
@@ -471,7 +478,8 @@
       // v0.3.14：身份短句取 archetype 优先、退回 tagline——账本建档渠道的联系人（如陈国邦）
       // 没有 seedArchetypes 给的 archetype，但引擎的 ptEnsureTaglines 有 tagline，旧写法会空着
       var rowTag = npc.archetype || npc.tagline || '';
-      return '<div data-conv="' + esc(id) + '" class="pt-row">' +
+      // v0.3.25（三席联审 J18）：可点行补 role/tabindex（键盘可达的第一步；Enter/Space 激活与焦点样式后续批）
+      return '<div class="pt-row" role="button" tabindex="0" data-conv="' + esc(id) + '">' +
         '<span class="pt-ava' + (isFam ? ' family' : '') + '">' + esc(String(name).slice(0, 1)) + '</span>' +
         '<span class="pt-mid"><span class="pt-name"><span>' + esc(name) + (rowTag ? ' <span style="font-size:10px;color:var(--dim);">' + esc(rowTag) + '</span>' : '') + '</span>' +
         '<span class="pt-time">' + (npc.dm_history && npc.dm_history.length ? esc((npc.dm_history[npc.dm_history.length - 1] || {}).time || '') : '') + '</span></span>' +
@@ -515,7 +523,11 @@
     var n = Math.min(6, Math.max(2, ids.length));
     saveOutbox({}).then(function () {
       setTyping(true);
-      try { eventEmit('pt_request_dm', { reason: reason, n: String(n) + '-3', focus: focus, linesByConv: linesByConv }); } catch (e) { toast('error', '私信触发失败: ' + e.message); }
+      try { eventEmit('pt_request_dm', { reason: reason, n: String(n) + '-3', focus: focus, linesByConv: linesByConv }); } catch (e) {
+        // v0.3.25（三席联审 M18）：清箱成功但触发抛错＝消息已在箱外——原样写回待发箱，不静默吞
+        try { Object.keys(linesByConv).forEach(function (nm) { (linesByConv[nm] || []).forEach(function (ln) { queueOutbox(nm, String(ln)); }); }); } catch (e2) {}
+        toast('error', '私信触发失败，消息已放回待发箱：' + e.message);
+      }
       toast('success', '📨 已发送，等他们回复…');
       renderFab();
       render();
@@ -571,7 +583,7 @@
       (queued > 0 ? '<span style="margin-left:auto;font-size:11px;color:var(--blue);">✍️ 待发' + queued + '条</span>' : '') + '</div>' +
       '<div class="pt-msgs">' + (items.join('') || '<div style="text-align:center;color:var(--dim);padding:20px;font-size:12px;">暂无消息</div>') + '</div>' +
       typing +
-      (!ptApiReady() && obMsgs.length ? '<div class="pt-banner" style="background:#b3541e;cursor:default;"><span class="t" style="color:#fff;">⚠️ 未填私信 API：待发消息发不出去——去「设置」补好地址和 Key</span></div>' : '') +
+      (!ptApiReady() && obMsgs.length ? '<div class="pt-banner" style="background:' + C.warn + ';cursor:default;"><span class="t" style="color:#fff;">⚠️ 未填私信 API：待发消息发不出去——去「设置」补好地址和 Key</span></div>' : '') +
       '<div class="pt-chips">' + QUICK.map(function (q) { return '<span class="pt-chip" data-quick="' + esc(q) + '">' + esc(q) + '</span>'; }).join('') + '</div>' +
       '<div class="pt-inputbar"><input id="piaotiao-input" placeholder="发消息…（加入待发，回列表统一发送）" autocomplete="off" />' +
       '<button id="piaotiao-queue" class="pt-btn send" title="加入待发，回列表统一发送">发送</button></div></div>';
@@ -734,8 +746,10 @@
       // 离场/敌对；正常在册（available/active）不显示任何状态字。
       var stMap = { offline: '已离场', hostile: '敌对' };
       var st = stMap[ptBare(c.status)];
-      var tag = ((ptBare(c.attitude) || '') + (st ? '·' + st : ''));
-      return '<div class="pt-row" data-contact="' + esc(id) + '"><span class="pt-ava" style="background:' + groupAvaColor(c) + ';">' + esc(nm.slice(0, 1)) + '</span>' +
+      // v0.3.25（三席联审 J15）：attitude 为空时不再拼出前导「·」（空态度+离场 → 「·已离场」悬挂）
+      var att = ptBare(c.attitude) || '';
+      var tag = att && st ? att + '·' + st : (att || st || '');
+      return '<div class="pt-row" role="button" tabindex="0" data-contact="' + esc(id) + '"><span class="pt-ava" style="background:' + groupAvaColor(c) + ';">' + esc(nm.slice(0, 1)) + '</span>' +
         '<span class="pt-mid"><span class="pt-name"><span class="pt-nm">' + esc(nm) + '</span>' + (tag ? '<span class="pt-tag" style="color:' + (st === '敌对' ? 'var(--red)' : 'var(--dim)') + ';">' + esc(tag) + '</span>' : '') +
         taglineHtml(contactPreview(c, id, nm)) + '</span>' +
         '<span class="pt-meta">想要：' + esc(ptBare(c.wants) || '—') + '｜他欠我' + ((c.favors_owed || []).length) + '·我欠他' + ((c.favors_debt || []).length) + '</span></span></div>';
@@ -765,7 +779,7 @@
       var sub = taglineOf(nm, nm) ||
         (contactByName[nm] ? contactPreview(contactByName[nm].c, contactByName[nm].id, nm) : '') ||
         (famLabel + (role === '一家之主' ? '家主' : role) + '，家里的事瞒着TA也瞒着外头');
-      return '<div class="pt-row" data-contact="' + esc(nm) + '"><span class="pt-ava family">' + esc(nm.slice(0, 1)) + '</span>' +
+      return '<div class="pt-row" role="button" tabindex="0" data-contact="' + esc(nm) + '"><span class="pt-ava family">' + esc(nm.slice(0, 1)) + '</span>' +
         '<span class="pt-mid"><span class="pt-name"><span class="pt-nm">' + esc(nm) + '</span>' + roleTag + '<span class="pt-tag" style="color:var(--dim);">' + esc(famLabel) + (rel !== null && rel !== undefined && rel !== '' ? '·关系' + esc(String(ptBare(rel))) : '') + '</span>' +
         taglineHtml(sub) + '</span>' +
         '<span class="pt-meta">' + (extra || '') + contactMetaSuffix(nm) + '</span></span></div>';
@@ -936,7 +950,7 @@
     var attrs = 'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"';
     var plotN = parseInt(lsGet('piaotiao_plot_n'), 10) || 6;
     return '<div class="pt-cfg" style="padding-bottom:14px;">' +
-      '<div style="background:var(--header);padding:9px 14px;font-size:13px;margin-bottom:4px;"><b>手机设置</b> <span style="color:var(--dim);font-size:11px;">independent API</span></div>' +
+      '<div style="background:var(--header);padding:9px 14px;font-size:13px;margin-bottom:4px;"><b>手机设置</b> <span style="color:var(--dim);font-size:11px;">私信专线（与正文 API 相互独立）</span></div>' +
       '<label>API 地址（OpenAI 兼容）</label><textarea id="piaotiao-cfg-url" rows="1" ' + attrs + ' placeholder="https://api.xxx.com/v1">' + esc(cfg.url || cfg.apiurl || '') + '</textarea>' +
       '<label>API Key</label><input id="piaotiao-cfg-key" type="text" class="piao-mask" readonly ' + attrs + ' placeholder="sk-..." value="' + esc(cfg.key || '') + '" />' +
       '<label>模型名（🔄 拉取后可选）</label><input id="piaotiao-cfg-model" list="piaotiao-cfg-models" ' + attrs + ' placeholder="deepseek-chat" value="' + esc(cfg.model || '') + '" />' +

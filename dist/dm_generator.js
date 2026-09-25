@@ -682,7 +682,8 @@ function ptAttributeTo(rows, sb, targetId) {
 }
 
 // ── 主流程（请求排队 + 合并，绝不丢单） ──
-var _busy = false, _pending = [];
+// v0.3.25（三席联审 M16）：删除死守卫 _busy/_pending——声明后全文无置位处（实际队列用 _pumping/_reqQueue），
+// L1181 的检查恒 false，只会在排障时误导（以为是生成期跳过）。
 function ptMergeRequests(batch) {
   var reasons = [], focus = [], lines = {};
   for (var i = 0; i < batch.length; i++) {
@@ -1176,24 +1177,31 @@ function ptQuietPing() {
   console.info(PT_TAG, '保底轮：', pname, '（连续', _quietStreak, '次调度无事件）');
 }
 
-var _lastFloorSeen = -1;                                   // v0.3.8：楼层去重闸（message_received 一楼会多次触发）
+// v0.3.8：楼层去重闸（message_received 一楼会多次触发）
+// v0.3.25（三席联审 M14）：闸键改「楼号:内容长度」指纹——真机探针实证 swipe 重掷同楼号新内容
+// 会以同楼号重放 message_received，纯楼号闸把新内容当重放整轮跳过；同长重放仍跳过，异长放行。
+// 普通生成单波（真机探针实证），指纹不会引爆 Bug H。旧聊天无 _lastLogFloorLen 时刷新后
+// 会多跑一遍流水线（storyScan 幂等、eventTick 有冷却），无害。
+var _lastFloorSeen = '';
 async function ptOnFloorLog() {
-  if (_busy || _pending.length) return;
   var vars = ptRead();
   var sb = (vars && vars.pt) ? vars.pt : null;
   if (!sb || !sb.npcs) return;
   var curFloor = -1;
   try { if (typeof getLastMessageId === 'function') curFloor = getLastMessageId(); } catch (e0) {}
   if (curFloor >= 0) {
-    if (_lastFloorSeen < 0 && sb._lastLogFloor != null) _lastFloorSeen = sb._lastLogFloor;  // 刷新后从聊天级恢复
-    if (curFloor === _lastFloorSeen) return;               // 同楼重放（生成结束/全局脚本/编辑都会再触发）→ 跳过
-    _lastFloorSeen = curFloor;
+    var mesLen = 0;
+    try { var _flc = parent.SillyTavern.getContext().chat; var _flm = _flc[curFloor]; mesLen = ((_flm && _flm.mes) || '').length; } catch (eL) {}
+    var floorKey = curFloor + ':' + mesLen;
+    if (_lastFloorSeen === '' && sb._lastLogFloor != null) _lastFloorSeen = sb._lastLogFloor + ':' + (sb._lastLogFloorLen != null ? sb._lastLogFloorLen : 0);  // 刷新后从聊天级恢复
+    if (floorKey === _lastFloorSeen) return;               // 同楼同内容重放（生成结束/全局脚本/编辑都会再触发）→ 跳过
+    _lastFloorSeen = floorKey;
     // v0.3.23（M5 持久写点）：刷新会清掉内存里的 _quietStreak；若上一楼刚有过私信活动，
     // 不该马上判「冷场」——用聊天级写点补一次（跨刷新仍认得出「刚聊过」）
     if (sb._lastDmFloor != null && curFloor - sb._lastDmFloor <= 1) _quietStreak = 0;
     // v0.3.11：写点前移（fire-and-forget 过串行闸）——下方待复信/积压超限/未配API几条提前return
     // 也要记楼，否则刷新后恢复不到楼号，同楼重放多跑一遍（Bug H 遗留项）
-    ptUpdate(function (v) { if (v.pt) v.pt._lastLogFloor = curFloor; return v; });
+    ptUpdate(function (v) { if (v.pt) { v.pt._lastLogFloor = curFloor; v.pt._lastLogFloorLen = mesLen; } return v; });
   }
   ptStoryScan(false);                                      // v0.3.5：正文出场人物自动入列（建会话不需要 API）
   var cfg = ptApiCfg();
