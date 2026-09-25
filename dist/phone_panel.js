@@ -236,7 +236,9 @@
   function defaultPanelPos() { recalib(); var pw = Math.min(360, vpW() - 24), ph = Math.min(600, vpH() - 60); setClientPos(panelHost, Math.max(8, (vpW() - pw) / 2), Math.max(8, (vpH() - ph) / 2 - 20)); }
 
   var CSS = [
-    '#piaotiao-phone-panel{--bg:' + C.bg + ';--panel:' + C.panel + ';--header:' + C.header + ';--line:' + C.line + ';--text:' + C.text + ';--dim:' + C.dim + ';--red:' + C.red + ';--green:' + C.green + ';--blue:' + C.blue + ';--mine:' + C.mine + ';--theirs:' + C.theirs + ';--gold:' + C.gold + ';}',
+    // v0.3.24（三席联审 J11）：变量同时挂 panel-root——长按菜单是 panelHost 的子节点（panelEl 的兄弟），
+    // 只挂 panelEl 时菜单的 var(--panel)/var(--line)/var(--text) 全解析无效＝透明底无边框，暗色主题不可读
+    '#piaotiao-phone-panel-root,#piaotiao-phone-panel{--bg:' + C.bg + ';--panel:' + C.panel + ';--header:' + C.header + ';--line:' + C.line + ';--text:' + C.text + ';--dim:' + C.dim + ';--red:' + C.red + ';--green:' + C.green + ';--blue:' + C.blue + ';--mine:' + C.mine + ';--theirs:' + C.theirs + ';--gold:' + C.gold + ';}',
     '#piaotiao-phone-panel *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}',
     '#piaotiao-phone-panel .pt-row{display:flex;gap:10px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel);cursor:pointer;}',
     '#piaotiao-phone-panel .pt-row:active{background:#e5e5e5;}',
@@ -354,7 +356,7 @@
   // 面板内文本输入框持有焦点且非空时跳过本次全刷；发送/失焦后自然恢复刷新（数据仍在变量层）。
   function typingGuardActive() {
     try {
-      var act = document.activeElement;
+      var act = DOC.activeElement; // v0.3.24（三席联审 M13）：面板挂在父文档（DOC=L16），裸 document 是 srcdoc iframe 自身——守卫恒 false，J5 修复从未生效
       if (!act || !panelEl || !panelEl.contains(act)) return false;
       if (act.tagName === 'TEXTAREA') return !!act.value;
       if (act.tagName !== 'INPUT') return false;
@@ -438,19 +440,30 @@
       var chd = f.children || {};
       for (var ckk in chd) { var n3 = ptBare(chd[ckk].name); if (n3) famNames[String(n3).trim()] = true; }
     }
-    var knownIds = [], strangerIds = [];
+    var knownIds = [], strangerIds = [], seenIds = {};
     Object.keys(npcs).forEach(function (id) {
+      seenIds[id] = true;
       var npc = npcs[id];
       var hasMsg = (npc.dm_history && npc.dm_history.length > 0) || ((ob[id] || []).length > 0);
       if (!hasMsg) return;
       var nm = String(npc.name || id).trim();
       (contactNames[nm] || famNames[nm] || npc.source === 'story' ? knownIds : strangerIds).push(id);
     });
-    var sortTs = function (a, b) { return (npcs[b].last_ts || 0) - (npcs[a].last_ts || 0); };
+    // v0.3.24（三席联审 J12）：待发箱键并入列表——中局新认识的联系人还没有 npcs 条目，
+    // 只遍历 npcs 会把「已入队待发」的会话整条隐身（toast 说发了、列表看不到行）。
+    // 行数据由 rowHtml 的空 npc 兜底；归属按账本联系人/家属判入 knownIds。
+    Object.keys(ob).forEach(function (id) {
+      if (seenIds[id] || !(ob[id] || []).length) return;
+      seenIds[id] = true;
+      var nm = String(convName(null, id) || id).trim();
+      (contactNames[nm] || famNames[nm] ? knownIds : strangerIds).push(id);
+    });
+    var sortTs = function (a, b) { return ((npcs[b] || {}).last_ts || 0) - ((npcs[a] || {}).last_ts || 0); };
     knownIds.sort(sortTs);
     strangerIds.sort(sortTs);
     function rowHtml(id) {
-      var npc = npcs[id];
+      // v0.3.24（J12）：待发箱键可能还没有 npcs 条目（中局新认识的联系人）——空 npc 兜底出行
+      var npc = npcs[id] || { name: id, dm_history: [], last_message: '', unread: 0 };
       var name = convName(sd, id);
       var unread = npc.unread || 0;
       var queued = (ob[id] || []).length;
@@ -512,13 +525,9 @@
   // ── 会话线程 ──
   function openConv(id) {
     // v0.3.13：联系人页传的是账本键（拼音 id），微信会话键是人名——折回一致，否则线程恒空
-    try {
-      var npcs0 = ((ptRead() || {}).pt || {}).npcs || {};
-      if (!npcs0[id]) {
-        var nm0 = convName(null, id);
-        if (nm0 && npcs0[nm0]) id = nm0;
-      }
-    } catch (e0) {}
+    // v0.3.24（三席联审 J12）：去掉「npcs 已有该人名」的门槛——中局新认识的联系人还没有
+    // npcs 条目，带门槛折不回去，线程/待发全按拼音读＝双隐身。convName 解析不到时原样返回，安全。
+    try { id = convName(null, id) || id; } catch (e0) {}
     currentConv = id;
     currentView = 'wechat';
     ptUpdate(function (v) {
@@ -598,7 +607,8 @@
       });
     }
     if (queueBtn) queueBtn.addEventListener('click', function (e) { e.stopPropagation(); doQueue(); });
-    if (input) input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.stopPropagation(); doQueue(); } });
+    // v0.3.24（三席联审 J14）：IME 组合期（拼音候选未上屏）的 Enter 是上屏动作，不是发送
+    if (input) input.addEventListener('keydown', function (e) { if (e.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') { e.stopPropagation(); doQueue(); } });
     panelEl.querySelectorAll('[data-quick]').forEach(function (el) {
       el.addEventListener('click', function (e) {
         e.stopPropagation();
