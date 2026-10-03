@@ -897,6 +897,10 @@ var AUTO_STRANGER_CHANCE = 0.06, AUTO_STRANGER_MINGAP = 10, AUTO_STRANGER_MAXPEN
 // 于是从第一楼起待复信/事件/陌生人/保底全线暂停（玩家读私信前手机是「死」的，会误判成 API 坏）。
 // 提到 4 给开局留一格余量，同时保留「积压就闭嘴」这个设计意图。
 var BACKLOG_MAX = 4, QUIET_TRIGGER = 6, _quietStreak = 0, PRO_GAP = 10;
+// v0.3.26（玩家反馈「一件事没处理完，新的已经来了好几个」）：BACKLOG_MAX 的判据从
+// ptUnreadTotal（未读条数）升级为 ptOpenTotal（未读＋正在等玩家回复的会话数）——
+// 旧口径下玩家把消息点开（unread 归零）就算"处理过"，全部触发源随即解锁继续轰炸；
+// 事件/待复信/陌生人/保底/剧情五个触发源同楼各查各的旧值也会全放行（在途闸刀 ptAutoBlocked 堵）。
 // v0.3.23（三席联审 M5）：节奏观测改用「活动序号」——任何请求入队即自增。旧实现 1.6s 后比
 // 请求队列长度，而 enqueueRequest 会立刻 shift 清空队列、_busy 语义也对不上，导致剧情/事件
 // 私信对观测完全不可见：刚生成过私信的楼照样累加 _quietStreak，QUIET_TRIGGER 一到就
@@ -965,10 +969,19 @@ function ptStoryScan(allowDm) {
       }
       return v;
     }).then(function () {
+      if (!toAsk.length) return;
+      // v0.3.26：旧版豁免积压（v0.3.9）会让察觉私信顶着满仓硬发（「新的来了好几个」的共犯）；
+      // 但 _story 已记楼，直接丢弃则永久丢——折衷：满仓或在途时挂起 _storyPending，下个楼层补发。
+      if (ptOpenTotal(ptRead().pt || {}) >= BACKLOG_MAX || ptAutoBlocked()) {
+        var pend = [];
+        for (var p = 0; p < toAsk.length; p++) pend.push(ptCanon(toAsk[p].name));
+        ptUpdate(function (v) { if (v.pt) v.pt._storyPending = pend; return v; })
+          .catch(function (eP) { console.warn(PT_TAG, '剧情私信挂起失败（下轮察觉变化会再触发）', eP); });
+        return;
+      }
       for (var i = 0; i < toAsk.length; i++) {
         var a = toAsk[i];
         var stanceHint = a.stance === '反抗' ? '质问、警告或冷处理' : a.stance === '共谋' ? '试探合作、递话' : a.stance === '被利用' ? '隐晦地求助' : '小心翼翼地试探';
-        // v0.3.9：剧情私信豁免积压节流——触发本身稀疏（35%+冷却8楼），且被节流会因 _story 已记楼而永久丢失
         enqueueRequest({ reason: a.name + '（' + (a.family || '') + '家的' + a.role + '，察觉度 ' + a.aw + '）在剧情里察觉到了家里的异常。以 TA 的立场主动给玩家发私信：' + stanceHint + '。符合 TA 的身份与性格，冷冰冰的礼貌，不要写成求救信，不要提系统或数值。没被点名的人这一轮不出现', n: '1-2', focus: [ptCanon(a.name)] });
       }
     });
@@ -1031,7 +1044,7 @@ function ptEventTick() {
           return v;
         });
         if (form === 'dm') {
-          if (ptUnreadTotal((ptRead().pt) || {}) >= BACKLOG_MAX) return;   // v0.3.9：积压超限，事件私信这轮不发
+          if (ptOpenTotal((ptRead().pt) || {}) >= BACKLOG_MAX || ptAutoBlocked()) return;   // v0.3.26：未处理超限或在途，事件私信这轮不发
         enqueueRequest({ reason: who + ' 主动给玩家发来消息——动机按 TA 的档案来（TA 想要什么/能提供什么/性格），也许是试探、也许是求办事、也许是送一个只有 TA 才知道的消息。没被点名的人这一轮不出现', n: '1-2', focus: [ptCanon(who)] });
         } else {
           var where = form === 'visit'
@@ -1053,6 +1066,14 @@ function ptUnreadTotal(sb) {
   for (var k in (sb && sb.npcs)) { if (Object.prototype.hasOwnProperty.call(sb.npcs, k)) n += (sb.npcs[k].unread || 0); }
   return n;
 }
+// v0.3.26：未处理对话数 = 未读总数 + 正在等玩家回复的会话数（last=THEM；读了没回也挂着）。
+// 一切「主动私信」的积压闸一律查它——「一件事没处理完就不来新的」。
+function ptOpenTotal(sb) {
+  return ptUnreadTotal(sb) + Object.keys(ptWaitingMap(sb || {})).length;
+}
+// v0.3.26 在途闸刀：队列里还有请求或正在生成时，一切主动源不再叠加。玩家自己的回信
+// （urgent，enqueueRequest 第二参）不查此闸，保持即时。
+function ptAutoBlocked() { return _reqQueue.length > 0 || _pumping; }
 // 等待回复名单（last=THEM 的人）：保底轮不再追发（真人会干等）
 function ptWaitingMap(sb) {
   var w = {};
@@ -1143,7 +1164,8 @@ function ptQuietPing() {
   var v = ptRead();
   var sb = v && v.pt;
   if (!sb) return;
-  if (ptUnreadTotal(sb) >= BACKLOG_MAX) return;      // 积压上限内才保底
+  if (ptOpenTotal(sb) >= BACKLOG_MAX) return;        // v0.3.26：未处理超限不保底（原查未读，读了没回即解锁）
+  if (ptAutoBlocked()) return;                       // v0.3.26：在途不叠加
   var waiting = ptWaitingMap(sb);
   var sd = ptStatData() || {};
   var contacts = sd.contacts || {};
@@ -1204,6 +1226,12 @@ async function ptOnFloorLog() {
     ptUpdate(function (v) { if (v.pt) { v.pt._lastLogFloor = curFloor; v.pt._lastLogFloorLen = mesLen; } return v; });
   }
   ptStoryScan(false);                                      // v0.3.5：正文出场人物自动入列（建会话不需要 API）
+  // v0.3.26：剧情私信挂起补发——上楼满仓/在途没发成的察觉私信，这楼有空位且不在途就补发
+  if (sb._storyPending && sb._storyPending.length && !ptAutoBlocked() && ptOpenTotal(sb) < BACKLOG_MAX) {
+    var pendIds = sb._storyPending.slice(0, 2);
+    ptUpdate(function (v) { if (v.pt) v.pt._storyPending = []; return v; });
+    enqueueRequest({ reason: '剧情推进后，顺着刚才正文发生的事，给玩家发一条新消息。没有新鲜事就保持沉默', n: '1', focus: pendIds });
+  }
   var cfg = ptApiCfg();
   if (!cfg) return;                                        // 未配置独立 API：正文楼什么都不做
   ptStoryScan(true);                                       // v0.3.5：察觉变化 → 剧情私信候选
@@ -1238,7 +1266,12 @@ async function ptOnFloorLog() {
     if (h.length && h[h.length - 1].sender === 'THEM') pendingIds.push(k);
   }
   if (pendingIds.length && pendingIds.length <= 3) {
-    if (ptUnreadTotal(sb) >= BACKLOG_MAX) return;          // v0.3.9：积压超限，主动私信全线暂停
+    // v0.3.26 跟进三重收窄：①未处理超限（读了没回也计数）；②隔楼跟进——上一楼刚有过私信
+    // 活动（_lastDmFloor）这楼不再跟发，「一件事没处理完每楼都来新的」的主犯就是这条每楼直发；
+    // ③在途不叠加。玩家主动回信（面板发送）不经过此分支，不受影响。
+    if (ptOpenTotal(sb) >= BACKLOG_MAX) return;
+    if (curFloor >= 0 && sb._lastDmFloor != null && curFloor - sb._lastDmFloor < 2) return;
+    if (ptAutoBlocked()) return;
     pendingIds = pendingIds.filter(function (pid) { return ptProOk(pid); }).slice(0, 2);
     if (pendingIds.length) {
       var names = pendingIds.map(function (id) { return (sb.npcs[id] && sb.npcs[id].name) || id; });
@@ -1247,7 +1280,7 @@ async function ptOnFloorLog() {
     return;
   }
   // 2) 偶尔一个体制陌生人主动来探路
-  if (ptUnreadTotal(sb) >= BACKLOG_MAX) return;            // v0.3.9：积压超限，不再加新噪声
+  if (ptOpenTotal(sb) >= BACKLOG_MAX) return;              // v0.3.26：未处理超限，不再加新噪声
   var auto = sb._auto || { turns: 0, last: -99 };
   var turns = (auto.turns || 0) + 1;
   var unreadTotal = 0;
@@ -1263,7 +1296,7 @@ async function ptOnFloorLog() {
     if (curFloor >= 0) v.pt._lastLogFloor = curFloor;      // v0.3.8：持久化已处理楼号（刷新后兜底）
     return v;
   });
-  if (hit && ptUnreadTotal(sb) < BACKLOG_MAX) enqueueRequest({ reason: '全新的体制内陌生人主动来探路（按素材库现抽）：也许是打探，也许是求办事，也许是送消息投诚', n: '1' });
+  if (hit && ptOpenTotal(sb) < BACKLOG_MAX && !ptAutoBlocked()) enqueueRequest({ reason: '全新的体制内陌生人主动来探路（按素材库现抽）：也许是打探，也许是求办事，也许是送消息投诚', n: '1' });
 }
 
 // 请求队列（批量合并）

@@ -426,7 +426,11 @@
     var ob = loadOutbox();
     var obCount = outboxCount();
     var banner = '';
-    if (obCount > 0 && !ptApiReady()) {
+    // v0.3.26（玩家反馈「导入后变量不更新」）：MVU 没拉起来时数值不会动，玩家无从知道原因——
+    // 面板能挂载说明卡内脚本在跑、仓库 CDN 通，此时 Mvu 缺位只剩 MVU 源被墙/脚本未放行两种可能。
+    if (!(window.Mvu && window.Mvu.events)) {
+      banner = '<div id="piaotiao-nomvu" class="pt-banner" style="background:' + C.err + ';cursor:default;"><span class="t" style="color:#fff;">⚠️ 账本系统（MVU）未就绪：数值不会随剧情更新。自查：①酒馆助手已安装且放行本卡脚本 ②网络能访问 cdn.jsdelivr.net——处理后刷新酒馆</span></div>';
+    } else if (obCount > 0 && !ptApiReady()) {
       // A6：没配 API 时点「确定发送」也发不出去（消息全留在待发箱）——先提示补配置
       banner = '<div id="piaotiao-noapi" class="pt-banner" style="background:' + C.warn + ';cursor:default;"><span class="t" style="color:#fff;">⚠️ 还没填私信 API：消息发不出去，会一直留在待发箱——去「设置」补好地址和 Key</span></div>';
     } else if (obCount > 0) {
