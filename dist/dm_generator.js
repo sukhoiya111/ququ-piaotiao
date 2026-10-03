@@ -737,12 +737,11 @@ async function ptRunOnce(req) {
         } catch (eF) {
           console.warn(PT_TAG, '单人调用失败', fids[fi], eF);
           // v0.3.28（军规 2，真机实锤：私信站 503 无渠道时跟进私信凭空蒸发、玩家零感知）：
-          // 失败必须出声，且回滚 _chased——否则该 NPC 永远不再被催，手机表现成"死的"。
+          // 失败必须出声。v0.3.29：回滚已删——置位改到落库侧（成功才置位），失败天然无痕。
           try {
             var nmF = (sb.npcs[fids[fi]] && sb.npcs[fids[fi]].name) || fids[fi];
             ptNotify('error', '📱 ' + nmF + ' 的私信没能生成（API 无响应或格式异常）——本轮跳过，剧情再推进时可能会再来');
           } catch (eN2) { /* 出声失败不阻塞 */ }
-          try { ptUpdate(function (v) { var nn = v.pt && v.pt.npcs && v.pt.npcs[fids[fi]]; if (nn) nn._chased = false; return v; }); } catch (eU2) { /* 回滚失败下次仍被闸，可接受 */ }
         }
       }
     } else {
@@ -833,7 +832,12 @@ async function ptRunOnce(req) {
       if (exN && (exN.unread || 0) >= 3 && !(req.focus && req.focus.indexOf(id) !== -1)) continue;
       ptPushThem(v, id, nm, row.type, row.content);
       // v0.3.12：记主动冷却写点（回信轮不算主动）
-      if (!req.linesByConv && v.pt.npcs[id]) v.pt.npcs[id]._lastPro = proFloor;
+      if (!req.linesByConv && v.pt.npcs[id]) {
+        v.pt.npcs[id]._lastPro = proFloor;
+        // v0.3.29：催办置位落库侧统一写——主动私信真实落到玩家手机后才算"催过"，
+        // 该 NPC 在玩家回复（ptPushMe 清位）前不再被跟发；生成失败无落库＝无置位，下楼自然再试。
+        v.pt.npcs[id]._chased = true;
+      }
     }
     for (var ti = 0; ti < tags.length; ti++) {
       var tid = ptCanon(tags[ti].name);
@@ -1292,9 +1296,9 @@ async function ptOnFloorLog() {
     if (h.length && h[h.length - 1].sender === 'THEM') pendingIds.push(k);
   }
   if (pendingIds.length && pendingIds.length <= 3) {
-    // v0.3.26 跟进收窄 + v0.3.27 实机裁决三件：①未处理超限（会话去重口径）；②隔楼跟进——
+    // v0.3.26 跟进收窄 + v0.3.27/29 实机裁决：①未处理超限（会话去重口径）；②隔楼跟进——
     // 上一楼刚有私信活动这楼不再跟发；③**催办限次 _chased**——同一 NPC 在玩家回复他之前
-    // 最多追加一条跟进（「一件事没处理完就一直催」的根治；玩家回复 ptPushMe 即清位）；
+    // 最多追加一条跟进（置位在落库侧，见 ptRunOnce；玩家回复 ptPushMe 清位）；
     // ④在途不叠加；⑤一次只催 1 人（原 2 人，更冷）。玩家主动回信（面板发送）不经过此分支。
     if (ptOpenTotal(sb) >= BACKLOG_MAX) return;
     if (curFloor >= 0 && sb._lastDmFloor != null && curFloor - sb._lastDmFloor < 2) return;
@@ -1304,15 +1308,10 @@ async function ptOnFloorLog() {
     }).slice(0, 1);
     if (pendingIds.length) {
       var names = pendingIds.map(function (id) { return (sb.npcs[id] && sb.npcs[id].name) || id; });
+      // v0.3.29：置位不在这里——改到 ptRunOnce 成功落库侧（与消息落库同一 ptUpdate 原子写）。
+      // 真机实证（v1.2.8）：入队侧置位走串行写队列，开局 MVU 播种期写乱序（军规 34C），迟到的
+      // 置位会覆盖失败回滚，催办闸残留。成功才置位＝失败自然无痕，无需回滚。
       enqueueRequest({ reason: '剧情推进后，顺着刚才正文发生的事，给玩家发一条新消息。没有新鲜事就保持沉默', n: '1', focus: pendingIds });
-      ptUpdate(function (v) {
-        if (!v.pt) return v;
-        for (var ci = 0; ci < pendingIds.length; ci++) {
-          var cn = v.pt.npcs[pendingIds[ci]];
-          if (cn) cn._chased = true;
-        }
-        return v;
-      }).catch(function (eC) { console.warn(PT_TAG, '催办置位失败（下次可能重复催一次）', eC); });
     }
     return;
   }
