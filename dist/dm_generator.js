@@ -720,7 +720,11 @@ async function ptRunOnce(req) {
         try {
           var b2 = await ptBuildPromptFor(sb, convIds[ci], '1-2', req.reason || '玩家刚在微信里回复了你', false);
           all = all.concat(await ptCallBuilt(b2, convIds[ci]));   // v0.3.14：回信归属到该会话本人
-        } catch (eC) { console.warn(PT_TAG, '回信单人调用失败', convIds[ci], eC); }
+        } catch (eC) {
+          console.warn(PT_TAG, '回信单人调用失败', convIds[ci], eC);
+          // v0.3.28（军规 2）：回信生成失败也必须出声——玩家消息已入账（v0.3.11 契约），说清"消息没丢、是回复没生成"
+          try { ptNotify('error', '📱 回信没能生成（API 无响应）——你的消息已入账，稍后在会话里再发一条即可重试'); } catch (eN3) {}
+        }
       }
     } else if (Array.isArray(req.focus) && req.focus.length) {
       var fids = req.focus.slice(0, 2);
@@ -730,7 +734,16 @@ async function ptRunOnce(req) {
           var b1 = await ptBuildPromptFor(sb, fid, req.n, req.reason, false);
           var r1 = await ptCallBuilt(b1, fid);
           all = all.concat(r1);   // v0.3.14：归属校正已在 ptCallBuilt 内完成，不再按名过滤（旧行为会丢回信）
-        } catch (eF) { console.warn(PT_TAG, '单人调用失败', fids[fi], eF); }
+        } catch (eF) {
+          console.warn(PT_TAG, '单人调用失败', fids[fi], eF);
+          // v0.3.28（军规 2，真机实锤：私信站 503 无渠道时跟进私信凭空蒸发、玩家零感知）：
+          // 失败必须出声，且回滚 _chased——否则该 NPC 永远不再被催，手机表现成"死的"。
+          try {
+            var nmF = (sb.npcs[fids[fi]] && sb.npcs[fids[fi]].name) || fids[fi];
+            ptNotify('error', '📱 ' + nmF + ' 的私信没能生成（API 无响应或格式异常）——本轮跳过，剧情再推进时可能会再来');
+          } catch (eN2) { /* 出声失败不阻塞 */ }
+          try { ptUpdate(function (v) { var nn = v.pt && v.pt.npcs && v.pt.npcs[fids[fi]]; if (nn) nn._chased = false; return v; }); } catch (eU2) { /* 回滚失败下次仍被闸，可接受 */ }
+        }
       }
     } else {
       // 陌生人探路/自由轮：只给公开层正文（最近一楼场面），不给全量剧情、不给在办家庭明细
