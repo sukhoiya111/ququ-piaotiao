@@ -419,6 +419,7 @@ function ptPushMe(sb, id, name, text) {
   if (npc.dm_history.length > 400) npc.dm_history = npc.dm_history.slice(-400);
   npc.last_ts = Date.now();
   npc.last_message = String(text || '').substring(0, 50);
+  npc._chased = false; // v0.3.27：玩家回复即解除该 NPC 的催办禁令（跟进恢复正常）
 }
 function ptRecentMessages(v, id, n) {
   var npcs = (v.pt && v.pt.npcs) || {};
@@ -1066,10 +1067,22 @@ function ptUnreadTotal(sb) {
   for (var k in (sb && sb.npcs)) { if (Object.prototype.hasOwnProperty.call(sb.npcs, k)) n += (sb.npcs[k].unread || 0); }
   return n;
 }
-// v0.3.26：未处理对话数 = 未读总数 + 正在等玩家回复的会话数（last=THEM；读了没回也挂着）。
+// v0.3.27 实机修正（真机测试发现双重计数：开局 3 条种子＝3 未读＋3 等回复＝openTotal 6，
+// 主动私信全线憋死——比「太密」更糟的「死手机」，M11 同族教训）。口径改为「未处理对话数」
+// 按**会话去重**：有未读消息 或 正在等玩家回复 的会话各计 1 次（同一会话不叠算）。
 // 一切「主动私信」的积压闸一律查它——「一件事没处理完就不来新的」。
 function ptOpenTotal(sb) {
-  return ptUnreadTotal(sb) + Object.keys(ptWaitingMap(sb || {})).length;
+  sb = sb || {};
+  var n = 0;
+  var npcs = sb.npcs || {};
+  for (var k in npcs) {
+    if (!Object.prototype.hasOwnProperty.call(npcs, k)) continue;
+    var npc = npcs[k];
+    var h = npc.dm_history || [];
+    var waiting = h.length && h[h.length - 1].sender === 'THEM';
+    if ((npc.unread || 0) > 0 || waiting) n++;
+  }
+  return n;
 }
 // v0.3.26 在途闸刀：队列里还有请求或正在生成时，一切主动源不再叠加。玩家自己的回信
 // （urgent，enqueueRequest 第二参）不查此闸，保持即时。
@@ -1266,16 +1279,27 @@ async function ptOnFloorLog() {
     if (h.length && h[h.length - 1].sender === 'THEM') pendingIds.push(k);
   }
   if (pendingIds.length && pendingIds.length <= 3) {
-    // v0.3.26 跟进三重收窄：①未处理超限（读了没回也计数）；②隔楼跟进——上一楼刚有过私信
-    // 活动（_lastDmFloor）这楼不再跟发，「一件事没处理完每楼都来新的」的主犯就是这条每楼直发；
-    // ③在途不叠加。玩家主动回信（面板发送）不经过此分支，不受影响。
+    // v0.3.26 跟进收窄 + v0.3.27 实机裁决三件：①未处理超限（会话去重口径）；②隔楼跟进——
+    // 上一楼刚有私信活动这楼不再跟发；③**催办限次 _chased**——同一 NPC 在玩家回复他之前
+    // 最多追加一条跟进（「一件事没处理完就一直催」的根治；玩家回复 ptPushMe 即清位）；
+    // ④在途不叠加；⑤一次只催 1 人（原 2 人，更冷）。玩家主动回信（面板发送）不经过此分支。
     if (ptOpenTotal(sb) >= BACKLOG_MAX) return;
     if (curFloor >= 0 && sb._lastDmFloor != null && curFloor - sb._lastDmFloor < 2) return;
     if (ptAutoBlocked()) return;
-    pendingIds = pendingIds.filter(function (pid) { return ptProOk(pid); }).slice(0, 2);
+    pendingIds = pendingIds.filter(function (pid) {
+      return ptProOk(pid) && !(sb.npcs[pid] && sb.npcs[pid]._chased);
+    }).slice(0, 1);
     if (pendingIds.length) {
       var names = pendingIds.map(function (id) { return (sb.npcs[id] && sb.npcs[id].name) || id; });
       enqueueRequest({ reason: '剧情推进后，顺着刚才正文发生的事，给玩家发一条新消息。没有新鲜事就保持沉默', n: '1', focus: pendingIds });
+      ptUpdate(function (v) {
+        if (!v.pt) return v;
+        for (var ci = 0; ci < pendingIds.length; ci++) {
+          var cn = v.pt.npcs[pendingIds[ci]];
+          if (cn) cn._chased = true;
+        }
+        return v;
+      }).catch(function (eC) { console.warn(PT_TAG, '催办置位失败（下次可能重复催一次）', eC); });
     }
     return;
   }
